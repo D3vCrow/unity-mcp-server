@@ -50,103 +50,40 @@ function toolNameToRoute(toolName) {
 }
 
 // ─── Core tool names (always exposed individually) ───
+// Personal trim: 17 tools covering ~91% of a 15-session / 944-call audit
+// (Thrion Arena Multiplayer Update, 2026-03 → 2026-04).
+// All other tools remain reachable via unity_advanced_tool (with lazy route fallback).
 const CORE_TOOLS = new Set([
   // Connection & state
   "unity_editor_ping",
   "unity_editor_state",
-  "unity_project_info",
 
-  // Scene management
+  // Scene
   "unity_scene_info",
-  "unity_scene_open",
-  "unity_scene_save",
-  "unity_scene_new",
   "unity_scene_hierarchy",
-  "unity_scene_stats",
+  "unity_scene_save",
 
-  // GameObject CRUD
-  "unity_gameobject_create",
-  "unity_gameobject_delete",
+  // GameObject
   "unity_gameobject_info",
-  "unity_gameobject_set_transform",
-  "unity_gameobject_duplicate",
-  "unity_gameobject_set_active",
-  "unity_gameobject_reparent",
 
-  // Component management
+  // Components
   "unity_component_add",
-  "unity_component_remove",
-  "unity_component_get_properties",
   "unity_component_set_property",
+  "unity_component_get_properties",
   "unity_component_set_reference",
-  "unity_component_batch_wire",
-  "unity_component_get_referenceable",
 
-  // Asset management
-  "unity_asset_list",
-  "unity_asset_import",
-  "unity_asset_delete",
-  "unity_asset_create_prefab",
-  "unity_asset_instantiate_prefab",
-
-  // Script management
-  "unity_script_create",
-  "unity_script_read",
-  "unity_script_update",
+  // Code execution & console
   "unity_execute_code",
-
-  // Material
-  "unity_material_create",
-  "unity_renderer_set_material",
-
-  // Build & play
-  "unity_build",
-  "unity_play_mode",
-
-  // Console & Compilation
   "unity_console_log",
-  "unity_console_clear",
-  "unity_get_compilation_errors",
 
-  // Editor actions
+  // Play & editor actions
+  "unity_play_mode",
   "unity_execute_menu_item",
-  "unity_undo",
-  "unity_redo",
-  "unity_undo_history",
 
-  // Selection & search
-  "unity_selection_get",
-  "unity_selection_set",
-  "unity_selection_focus_scene_view",
-  "unity_selection_find_by_type",
-  "unity_search_by_component",
-  "unity_search_by_tag",
-  "unity_search_by_layer",
+  // Search
   "unity_search_by_name",
+  "unity_search_by_component",
   "unity_search_assets",
-  "unity_search_missing_references",
-
-  // Screenshots & capture
-  "unity_screenshot_game",
-  "unity_screenshot_scene",
-  "unity_graphics_scene_capture",
-  "unity_graphics_game_capture",
-
-  // Prefab basics
-  "unity_prefab_info",
-  "unity_set_object_reference",
-
-  // Packages
-  "unity_packages_list",
-  "unity_packages_add",
-  "unity_packages_remove",
-  "unity_packages_search",
-  "unity_packages_info",
-
-  // Queue & agents
-  "unity_queue_info",
-  "unity_agents_list",
-  "unity_agent_log",
 ]);
 
 /**
