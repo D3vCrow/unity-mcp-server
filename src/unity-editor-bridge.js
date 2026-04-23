@@ -1,6 +1,9 @@
 // Unity Editor HTTP Bridge Client
 // Communicates with the C# plugin running inside Unity Editor
 // Supports both queue mode (async ticket-based) and legacy sync mode
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { CONFIG } from "./config.js";
 import { getActiveBridgeUrl } from "./instance-discovery.js";
 
@@ -15,7 +18,38 @@ const BRIDGE_URL = `http://${CONFIG.editorBridgeHost}:${CONFIG.editorBridgePort}
 // Agent identity â€" tracks which AI agent is making requests
 let _currentAgentId = "default";
 
-// Mode detection â€" cached to avoid repeated 404 checks
+// X-MCP-Token: shared secret for the editor bridge's opt-in auth gate (added in
+// the D3vCrow security fork of unity-mcp-plugin). The plugin writes the secret
+// to %APPDATA%/unity-mcp/secret on Windows or $XDG_CONFIG_HOME/unity-mcp/secret
+// on Unix. When absent, we send no header and the plugin's EnforceToken=false
+// path accepts the request (upstream behavior).
+//
+// Loaded once at module init. If the operator regenerates the secret in the
+// dashboard, restart the MCP server process to pick up the new value.
+function _loadMcpToken() {
+  const base =
+    process.env.APPDATA ||
+    process.env.XDG_CONFIG_HOME ||
+    join(homedir(), ".config");
+  try {
+    return readFileSync(join(base, "unity-mcp", "secret"), "utf8").trim();
+  } catch {
+    return null;
+  }
+}
+const _mcpToken = _loadMcpToken();
+
+/**
+ * Build request headers including X-Agent-Id and, when available, X-MCP-Token.
+ * @param {object} [extra] - Additional headers to merge (e.g., Content-Type).
+ */
+function authHeaders(extra = {}) {
+  const h = { ...extra, "X-Agent-Id": _currentAgentId };
+  if (_mcpToken) h["X-MCP-Token"] = _mcpToken;
+  return h;
+}
+
+// Mode detection — cached to avoid repeated 404 checks
 let _useQueueMode = true;
 let _queueModeDetermined = false;
 
@@ -70,10 +104,7 @@ async function submitToQueue(apiPath, bodyString) {
 
   const response = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Agent-Id": _currentAgentId,
-    },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       apiPath,
       method: "POST",
@@ -119,9 +150,7 @@ async function pollQueueStatus(ticketId) {
       const url = `${getBridgeUrl()}/api/queue/status?ticketId=${ticketId}`;
       const response = await fetch(url, {
         method: "GET",
-        headers: {
-          "X-Agent-Id": _currentAgentId,
-        },
+        headers: authHeaders(),
         signal: AbortSignal.timeout(10000), // 10s per individual poll request
       });
 
@@ -193,10 +222,7 @@ async function sendCommandLegacyMode(command, params = {}) {
     try {
       const response = await fetch(url, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Agent-Id": _currentAgentId,
-        },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(params),
         signal: controller.signal,
       });
@@ -352,9 +378,7 @@ export async function getQueueInfo() {
     const url = `${getBridgeUrl()}/api/queue/info`;
     const response = await fetch(url, {
       method: "GET",
-      headers: {
-        "X-Agent-Id": _currentAgentId,
-      },
+      headers: authHeaders(),
       signal: AbortSignal.timeout(CONFIG.editorBridgeTimeout),
     });
 
@@ -382,9 +406,7 @@ export async function getTicketStatus(ticketId) {
     const url = `${getBridgeUrl()}/api/queue/status?ticketId=${ticketId}`;
     const response = await fetch(url, {
       method: "GET",
-      headers: {
-        "X-Agent-Id": _currentAgentId,
-      },
+      headers: authHeaders(),
       signal: AbortSignal.timeout(CONFIG.editorBridgeTimeout),
     });
 
@@ -1662,7 +1684,7 @@ export async function getProjectContext(category = null) {
 
   const response = await fetch(url, {
     method: "GET",
-    headers: { "X-Agent-Id": _currentAgentId },
+    headers: authHeaders(),
     signal: AbortSignal.timeout(5000),
   });
 
