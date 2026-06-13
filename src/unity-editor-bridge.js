@@ -111,7 +111,7 @@ async function submitToQueue(apiPath, bodyString) {
       body: bodyString,
       agentId: _currentAgentId,
     }),
-    signal: AbortSignal.timeout(CONFIG.editorBridgeTimeout),
+    signal: AbortSignal.timeout(CONFIG.submitTimeoutMs),
   });
 
   if (!response.ok) {
@@ -344,10 +344,20 @@ export async function sendCommand(command, params = {}) {
         }
       }
 
-      // If we get here, queue submit failed after retries
+      // If we get here, queue submit failed after retries.
       if (submitLastError) {
+        // Connection error (bridge down / stalled / mid-reload): legacy mode would just repeat
+        // the same 5-retry wait against the same dead bridge — pure doubling of the latency.
+        // Fail fast instead. (A genuine "queue not supported" 404 was already handled above by
+        // switching to legacy inside the loop, so reaching here means a real connectivity issue.)
+        if (isTransientError(submitLastError, null)) {
+          return {
+            success: false,
+            error: `Unity bridge unreachable after ${MAX_RETRIES} attempts: ${submitLastError.message}. It may be reloading or not running.`,
+          };
+        }
         console.warn(
-          `[MCP Bridge] Queue mode failed after retries, falling back to legacy sync mode: ${submitLastError.message}`
+          `[MCP Bridge] Queue mode failed (non-connection error), falling back to legacy sync mode: ${submitLastError.message}`
         );
         _queueModeDetermined = true;
         _useQueueMode = false;
