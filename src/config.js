@@ -23,6 +23,11 @@ export const CONFIG = {
   editorBridgePort: parseInt(process.env.UNITY_BRIDGE_PORT || "7890"),
   editorBridgeTimeout: parseInt(process.env.UNITY_BRIDGE_TIMEOUT || "60000"),
 
+  // Queue SUBMIT just enqueues a ticket and returns immediately; the long-running work is
+  // awaited separately by pollQueueStatus (queuePollTimeoutMs). Keep submit short so a
+  // stalled or unreachable bridge fails in seconds instead of the full 60s editorBridgeTimeout.
+  submitTimeoutMs: parseInt(process.env.UNITY_SUBMIT_TIMEOUT || "8000"),
+
   // Multi-instance support
   portRangeStart: parseInt(process.env.UNITY_PORT_RANGE_START || "7890"),
   portRangeEnd: parseInt(process.env.UNITY_PORT_RANGE_END || "7899"),
