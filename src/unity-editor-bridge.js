@@ -5,7 +5,8 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { CONFIG } from "./config.js";
-import { getActiveBridgeUrl } from "./instance-discovery.js";
+import { getActiveBridgeUrl, getActivePort, getSelectedInstance } from "./instance-discovery.js";
+import { resetWarnings } from "./capabilities.js";
 
 // Dynamic bridge URL â€" resolved per-call based on selected instance
 function getBridgeUrl() {
@@ -52,6 +53,46 @@ function authHeaders(extra = {}) {
 // Mode detection — cached to avoid repeated 404 checks
 let _useQueueMode = true;
 let _queueModeDetermined = false;
+
+// The queue-mode decision above (and the capability-warning dedupe in capabilities.js)
+// belong to ONE specific plugin build. They are cached against a fingerprint of the
+// connected peer — the active port plus the plugin/protocol version it advertises. When
+// that fingerprint changes — an explicit instance port-swap (selectInstance / a
+// per-request port override) OR a same-port plugin upgrade that bumps the advertised
+// version — the cached decision is stale: a plugin that GAINED queue support would
+// otherwise stay pinned to legacy sync mode for the rest of the session. On a real change
+// we drop the mode cache (re-detect on the next call) and re-arm the one-shot capability
+// warnings for the new peer.
+let _peerFingerprint = null;
+
+/** Fingerprint the connected peer: active port + advertised protocol/plugin version. */
+function peerFingerprint() {
+  const inst = getSelectedInstance();
+  // getActivePort() honours a per-request port override; the version fields come from the
+  // selected instance (absent for override/registry-sourced peers → "?" — port alone still
+  // keys the cache, and the reactive Unknown-API-endpoint fallback in capabilities.js
+  // backstops a missed reset).
+  return `${getActivePort()}|${inst?.protocolVersion ?? "?"}|${inst?.pluginVersion ?? "?"}`;
+}
+
+/**
+ * Invalidate the cached queue-mode decision + capability warnings when the connected peer
+ * changes (port-swap or same-port plugin upgrade/reconnect). Called at the top of
+ * sendCommand so a mid-session plugin change can't leave the server pinned to a stale mode.
+ * Returns true iff a reset happened (first contact just establishes the baseline).
+ * Exported for the sendCommand chokepoint and for tests.
+ */
+export function resetConnectionModeIfPeerChanged() {
+  const fp = peerFingerprint();
+  if (fp === _peerFingerprint) return false;
+  const firstContact = _peerFingerprint === null;
+  _peerFingerprint = fp;
+  if (firstContact) return false;
+  _queueModeDetermined = false;
+  _useQueueMode = true;
+  resetWarnings();
+  return true;
+}
 
 /**
  * Set the current agent ID. All subsequent sendCommand calls include this as X-Agent-Id header.
@@ -290,6 +331,8 @@ async function sendCommandLegacyMode(command, params = {}) {
  * with exponential backoff so multi-agent workflows stay resilient.
  */
 export async function sendCommand(command, params = {}) {
+  // A port-swap or same-port plugin upgrade invalidates the cached queue-mode decision.
+  resetConnectionModeIfPeerChanged();
   const bodyString = JSON.stringify(params);
 
   // If we've determined the plugin doesn't support queue mode, use legacy
