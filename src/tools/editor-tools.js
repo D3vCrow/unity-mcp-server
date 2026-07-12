@@ -2,6 +2,8 @@
 import * as bridge from "../unity-editor-bridge.js";
 
 import { formatResult } from "../response-format.js";
+import { callBatchWireWithFallback } from "../capabilities.js";
+import { getSelectedInstance } from "../instance-discovery.js";
 
 export const editorTools = [
   // â”€â”€â”€ Connection â”€â”€â”€
@@ -257,7 +259,10 @@ export const editorTools = [
       },
       required: ["references"],
     },
-    handler: async (params) => formatResult(await bridge.batchWireReferences(params)),
+    // Negotiated capability: fall back to N single set-reference calls when the
+    // connected plugin predates component/batch-wire (see src/capabilities.js).
+    handler: async (params) =>
+      formatResult(await callBatchWireWithFallback(bridge, getSelectedInstance(), params)),
   },
   {
     name: "unity_component_get_referenceable",
