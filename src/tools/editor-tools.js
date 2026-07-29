@@ -2,6 +2,7 @@
 import * as bridge from "../unity-editor-bridge.js";
 
 import { formatResult } from "../response-format.js";
+import { enrichComponentSearch, enrichAssetSearch } from "../search-facets.js";
 import { callBatchWireWithFallback } from "../capabilities.js";
 import { getSelectedInstance } from "../instance-discovery.js";
 
@@ -2458,7 +2459,10 @@ export const editorTools = [
   // â”€â”€â”€ Search & Find â”€â”€â”€
   {
     name: "unity_search_by_component",
-    description: "Find all GameObjects in the scene that have a specific component type. Returns their paths and instance IDs.",
+    description:
+      "Find all GameObjects in the scene that have a specific component type. Returns their paths and instance IDs. " +
+      "If the type does not resolve or matches nothing, the response carries availableComponentTypes (the most common " +
+      "types actually present in the active scene, with counts) — retry with one of those instead of guessing again.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2468,7 +2472,10 @@ export const editorTools = [
       },
       required: ["componentType"],
     },
-    handler: async (params) => formatResult(await bridge.findByComponent(params)),
+    handler: async (params) =>
+      formatResult(
+        await enrichComponentSearch(await bridge.findByComponent(params), () => bridge.getSceneStats({})),
+      ),
   },
   {
     name: "unity_search_by_tag",
@@ -2526,7 +2533,10 @@ export const editorTools = [
   },
   {
     name: "unity_search_assets",
-    description: "Search for assets in the project by name, type, and folder. Uses Unity's AssetDatabase search.",
+    description:
+      "Search for assets in the project by name, type, and folder. Uses Unity's AssetDatabase search. " +
+      "If a type filter matches nothing, the response carries availableAssetTypes (the types that DO match this query " +
+      "with the filter dropped, with counts) — retry with one of those instead of guessing again.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2536,7 +2546,8 @@ export const editorTools = [
         maxResults: { type: "number", description: "Maximum results to return (default: 100)" },
       },
     },
-    handler: async (params) => formatResult(await bridge.searchAssets(params)),
+    handler: async (params) =>
+      formatResult(await enrichAssetSearch(await bridge.searchAssets(params), params, (p) => bridge.searchAssets(p))),
   },
   {
     name: "unity_search_missing_references",
