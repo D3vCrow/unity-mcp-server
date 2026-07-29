@@ -225,6 +225,24 @@ test("enrichAssetSearch: a bad type gains the types that DO match", async () => 
   assert.match(out.hint, /Materal/, "the hint names the type that failed");
 });
 
+test("enrichAssetSearch: an untruncated retry says the counts are complete", async () => {
+  const out = await enrichAssetSearch(ASSET_MISS, { query: "rock", type: "Materal" }, stub(ASSET_RETRY));
+  assert.equal(out.assetTypesAreSampled, false);
+  assert.equal(out.assetTypesCountedFrom, 5);
+  assert.match(out.hint, /counts cover every match/);
+});
+
+test("enrichAssetSearch: a TRUNCATED retry declares the counts a sample", async () => {
+  // Live shape observed 2026-07-29: 10,774 matches, only 200 rows returned.
+  const truncated = { totalFound: 10774, returned: 3, results: ASSET_RETRY.results.slice(0, 3) };
+  const out = await enrichAssetSearch(ASSET_MISS, { query: "", type: "Materal" }, stub(truncated));
+  assert.equal(out.assetTypesAreSampled, true);
+  assert.equal(out.matchesWithoutTypeFilter, 10774);
+  assert.equal(out.assetTypesCountedFrom, 3);
+  assert.match(out.hint, /first 3 of 10774 matches/);
+  assert.match(out.hint, /treat them as a sample/, "a silent cap reads as exhaustive");
+});
+
 test("enrichAssetSearch: the retry drops type but keeps the other filters", async () => {
   const retry = stub(ASSET_RETRY);
   await enrichAssetSearch(ASSET_MISS, { query: "rock", type: "Materal", folder: "Assets/Props" }, retry);

@@ -163,13 +163,26 @@ export async function enrichAssetSearch(result, params, retrySearch) {
   if (facets.length === 0) return result;
 
   const { payload: retryPayload } = unwrapPayload(retry);
+  const total = Number(retryPayload && retryPayload.totalFound) || 0;
+  const sampled = Number(retryPayload && retryPayload.returned) || 0;
+
+  // The retry is capped at 200 rows, so on a large project the counts describe a
+  // SAMPLE, not the whole match set (observed live: 10,774 matches, 200 sampled).
+  // Say so — counts that look authoritative but aren't are worse than no counts.
+  const truncated = total > sampled && sampled > 0;
+  const scope = truncated
+    ? `counts are from the first ${sampled} of ${total} matches, so treat them as a sample`
+    : "counts cover every match";
+
   return rewrap({
     ...payload,
     availableAssetTypes: facets,
-    matchesWithoutTypeFilter: Number(retryPayload && retryPayload.totalFound) || 0,
+    matchesWithoutTypeFilter: total,
+    assetTypesCountedFrom: sampled,
+    assetTypesAreSampled: truncated,
     hint:
       `No asset matched type '${type}'. availableAssetTypes lists the types that ` +
-      "DO match this query with the type filter dropped — retry with one of these, " +
-      "or omit type entirely.",
+      `DO match this query with the type filter dropped (${scope}) — retry with one ` +
+      "of these, or omit type entirely.",
   });
 }

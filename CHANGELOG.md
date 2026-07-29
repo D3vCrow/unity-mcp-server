@@ -9,6 +9,8 @@ All notable changes to this package will be documented in this file.
   - A hit is never enriched and never pays for a second bridge call.
   - A facet-lookup failure returns the original result untouched — enrichment can never downgrade a working search into an error.
   - Error envelopes keep their `error` key, so `isErrorResult()` still sets the MCP `isError` flag (WIN A stays intact).
+  - Asset-type counts declare themselves a **sample** when the retry was truncated (`assetTypesAreSampled`, `assetTypesCountedFrom`, and a hint naming the ratio). Found by live verification: on Project-Horror a bogus type filter yields 19,494 matches with only 200 rows sampled — counts that look authoritative but aren't are worse than no counts.
+  - **Verified end-to-end against two live Unity projects** (`Smart Only` on `:7891`, `Obsidian Moon` on `:7893`), 12/12 each. Unity's own queue-ticket log is the independent proof of the cost control: a miss submits two tickets (search + scene-stats), a hit submits one.
   - Pattern lifted from the speedrun talent network API, which ships live facet counts on every list response so callers "discover valid values instead of guessing". Deviation on purpose: there the facets are free (same query), here they cost a round-trip, so they fire only on the miss. See `knowledge/research/2026-07-28-vet-speedrun-talent-network-developers.md` in the Dev workspace.
 
 ## [2.28.2] - 2026-04-22
