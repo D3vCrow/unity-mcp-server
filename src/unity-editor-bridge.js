@@ -63,6 +63,12 @@ export function setAgentId(agentId) {
 // Retry settings — handles Unity domain reloads (1-3 sec server downtime)
 const MAX_RETRIES = 4;
 const RETRY_BASE_DELAY_MS = 800; // 800ms, 1600ms, 3200ms, 6400ms
+// A timed-out request gets a much smaller budget than a refused one. A refused
+// connection fails instantly, so 4 retries cost only the 12s of backoff — which
+// is what MAX_RETRIES was tuned for. A timeout costs a full editorBridgeTimeout
+// (60s default) *before* it fails, so the same budget meant a busy Editor
+// burned ~5 min per call before returning an error.
+const MAX_TIMEOUT_RETRIES = 1;
 
 /**
  * Sleep helper for retry backoff
@@ -72,27 +78,63 @@ function sleep(ms) {
 }
 
 /**
- * Returns true if the error looks like a transient connection issue
- * (server temporarily down during Unity domain reload).
+ * True when this failure is a timed-out request rather than a dead peer.
+ * Two spellings exist because the two call shapes abort differently:
+ * `new AbortController()` + setTimeout raises AbortError, while
+ * `AbortSignal.timeout()` raises TimeoutError. Only AbortError was matched
+ * before, so queue-submit timeouts were classified as non-transient.
  */
-function isTransientError(error, response) {
+function isTimeoutError(error) {
+  return error.name === "AbortError" || error.name === "TimeoutError";
+}
+
+/**
+ * Classify a transient failure, or return null when it isn't transient.
+ *
+ * "down"    — nothing answered (connection refused/reset, or a 500/503 from a
+ *             half-alive server). Unity is restarting; retrying is cheap
+ *             because the attempt fails immediately.
+ * "timeout" — we gave up waiting. Unity is probably alive but busy (long domain
+ *             reload, heavy execute_code), and every retry costs another full
+ *             timeout window.
+ *
+ * Keeping these apart is the point: they need different retry budgets.
+ */
+function transientKind(error, response) {
   if (error) {
-    // Connection refused / reset / aborted — server is restarting
+    if (isTimeoutError(error)) {
+      return "timeout";
+    }
+    // Connection refused / reset — server is restarting
     const msg = error.message || "";
-    return (
+    const down =
       error.code === "ECONNREFUSED" ||
       error.code === "ECONNRESET" ||
       msg.includes("ECONNREFUSED") ||
       msg.includes("ECONNRESET") ||
-      msg.includes("fetch failed") ||
-      error.name === "AbortError"
-    );
+      msg.includes("fetch failed");
+    return down ? "down" : null;
   }
   // HTTP 500/503 during domain reload (server half-alive)
   if (response && (response.status === 503 || response.status === 500)) {
-    return true;
+    return "down";
   }
-  return false;
+  return null;
+}
+
+/**
+ * Returns true if the error looks like a transient connection issue
+ * (server temporarily down during Unity domain reload).
+ */
+function isTransientError(error, response) {
+  return transientKind(error, response) !== null;
+}
+
+/**
+ * Retry budget for a transient failure kind, as returned by transientKind().
+ */
+function retryBudgetFor(kind) {
+  return kind === "timeout" ? MAX_TIMEOUT_RETRIES : MAX_RETRIES;
 }
 
 /**
@@ -229,10 +271,11 @@ async function sendCommandLegacyMode(command, params = {}) {
       clearTimeout(timeout);
 
       // Transient server error — retry
-      if (isTransientError(null, response) && attempt < MAX_RETRIES) {
+      const httpKind = transientKind(null, response);
+      if (httpKind && attempt < retryBudgetFor(httpKind)) {
         const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
         console.error(
-          `[MCP Bridge] HTTP ${response.status} on ${command}, retrying in ${delay}ms (${attempt + 1}/${MAX_RETRIES})...`
+          `[MCP Bridge] HTTP ${response.status} on ${command}, retrying in ${delay}ms (${attempt + 1}/${retryBudgetFor(httpKind)})...`
         );
         await sleep(delay);
         continue;
@@ -258,19 +301,26 @@ async function sendCommandLegacyMode(command, params = {}) {
       lastError = error;
 
       // Transient connection error — retry with backoff
-      if (isTransientError(error, null) && attempt < MAX_RETRIES) {
+      const kind = transientKind(error, null);
+      const budget = retryBudgetFor(kind);
+      if (kind && attempt < budget) {
         const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
         console.error(
-          `[MCP Bridge] ${error.code || error.name || "Error"} on ${command}, retrying in ${delay}ms (${attempt + 1}/${MAX_RETRIES})...`
+          `[MCP Bridge] ${error.code || error.name || "Error"} on ${command}, retrying in ${delay}ms (${attempt + 1}/${budget})...`
         );
         await sleep(delay);
         continue;
       }
+
+      // Budget spent, or not transient at all. Without this the loop just fell
+      // through and re-issued the fetch with no backoff and no budget check,
+      // which is why a timeout budget alone would not have shortened anything.
+      break;
     }
   }
 
   // All retries exhausted
-  if (lastError?.name === "AbortError") {
+  if (lastError && isTimeoutError(lastError)) {
     return {
       success: false,
       error:
@@ -320,10 +370,12 @@ export async function sendCommand(command, params = {}) {
           submitLastError = submitError;
 
           // Check if it's a transient error worth retrying
-          if (isTransientError(submitError, null) && attempt < MAX_RETRIES) {
+          const submitKind = transientKind(submitError, null);
+          const submitBudget = retryBudgetFor(submitKind);
+          if (submitKind && attempt < submitBudget) {
             const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
             console.error(
-              `[MCP Bridge] Error submitting to queue: ${submitError.message}, retrying in ${delay}ms (${attempt + 1}/${MAX_RETRIES})...`
+              `[MCP Bridge] Error submitting to queue: ${submitError.message}, retrying in ${delay}ms (${attempt + 1}/${submitBudget})...`
             );
             await sleep(delay);
             continue;
