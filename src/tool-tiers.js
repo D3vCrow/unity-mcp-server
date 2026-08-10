@@ -15,7 +15,7 @@
 // restarting the MCP server.
 
 import { sendCommand } from "./unity-editor-bridge.js";
-import { formatResult } from "./response-format.js";
+import { formatResult, toolErrorText } from "./response-format.js";
 
 /**
  * Explicit route overrides for tools whose API endpoints
@@ -326,7 +326,11 @@ export function splitToolTiers(allEditorTools) {
           }
           return formatResult(result);
         } catch (err) {
-          return `Error executing "${tool}" (lazy route: ${route}): ${err.message}.${suggestion}`;
+          return toolErrorText(
+            `lazy-route-failed ("${tool}" via "${route}")`,
+            err,
+            `.${suggestion}`
+          );
         }
       }
 

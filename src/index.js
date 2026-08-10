@@ -46,7 +46,7 @@ import {
 } from "./instance-discovery.js";
 import { debugLog } from "./state-persistence.js";
 import { CONFIG } from "./config.js";
-import { isErrorResult } from "./response-format.js";
+import { isErrorResult, toolErrorText } from "./response-format.js";
 
 // ─── Response size protection ───
 // Prevents "Write EOF" errors when tool responses exceed stdio transport limits.
@@ -459,7 +459,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       content: [
         {
           type: "text",
-          text: `Error executing ${name}: ${error.message}`,
+          text: toolErrorText(`tool-exec-failed (${name})`, error),
         },
       ],
       isError: true,

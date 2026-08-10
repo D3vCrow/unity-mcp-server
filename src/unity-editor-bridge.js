@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { CONFIG } from "./config.js";
 import { getActiveBridgeUrl, getActivePort, getSelectedInstance } from "./instance-discovery.js";
 import { resetWarnings } from "./capabilities.js";
+import { redactSensitive, toolErrorText } from "./response-format.js";
 
 // Dynamic bridge URL â€" resolved per-call based on selected instance
 function getBridgeUrl() {
@@ -157,7 +158,7 @@ async function submitToQueue(apiPath, bodyString) {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`HTTP ${response.status}: ${text}`);
+    throw new Error(`HTTP ${response.status}: ${redactSensitive(text)}`);
   }
 
   const data = await response.json();
@@ -208,7 +209,7 @@ async function pollQueueStatus(ticketId) {
         const text = await response.text();
         return {
           success: false,
-          error: `Failed to poll queue status: HTTP ${response.status}: ${text}`,
+          error: `Failed to poll queue status: HTTP ${response.status}: ${redactSensitive(text)}`,
         };
       }
 
@@ -242,7 +243,7 @@ async function pollQueueStatus(ticketId) {
     } catch (error) {
       return {
         success: false,
-        error: `Error polling queue: ${error.message}`,
+        error: toolErrorText("queue-poll-failed", error),
       };
     }
   }
@@ -281,7 +282,7 @@ async function sendCommandLegacyMode(command, params = {}) {
 
       if (!response.ok) {
         const text = await response.text();
-        return { success: false, error: `HTTP ${response.status}: ${text}` };
+        return { success: false, error: `HTTP ${response.status}: ${redactSensitive(text)}` };
       }
 
       const data = await response.json();
@@ -437,7 +438,7 @@ export async function getQueueInfo() {
 
     if (!response.ok) {
       const text = await response.text();
-      return { success: false, error: `HTTP ${response.status}: ${text}` };
+      return { success: false, error: `HTTP ${response.status}: ${redactSensitive(text)}` };
     }
 
     const data = await response.json();
@@ -445,7 +446,7 @@ export async function getQueueInfo() {
   } catch (error) {
     return {
       success: false,
-      error: `Failed to get queue info: ${error.message}`,
+      error: toolErrorText("queue-info-failed", error),
     };
   }
 }
@@ -465,7 +466,7 @@ export async function getTicketStatus(ticketId) {
 
     if (!response.ok) {
       const text = await response.text();
-      return { success: false, error: `HTTP ${response.status}: ${text}` };
+      return { success: false, error: `HTTP ${response.status}: ${redactSensitive(text)}` };
     }
 
     const data = await response.json();
@@ -473,7 +474,7 @@ export async function getTicketStatus(ticketId) {
   } catch (error) {
     return {
       success: false,
-      error: `Failed to get ticket status: ${error.message}`,
+      error: toolErrorText("ticket-status-failed", error),
     };
   }
 }
