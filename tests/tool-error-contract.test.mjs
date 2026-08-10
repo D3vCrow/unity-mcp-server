@@ -185,6 +185,47 @@ if (offenders.length === 0) {
   );
 }
 
+// ─── Part 4: wired sites actually emit the contract shape ───
+//
+// Parts 1-3 test the seam in isolation and scan for unrouted sites. Neither
+// proves a real call site produces the new shape at runtime. These two do, with
+// no Unity and no module mocking: when nothing is listening on the bridge port,
+// `fetch` rejects and the catch blocks in unity-editor-bridge.js run for real.
+//
+// Skips itself when the bridge IS up, because then the functions take their
+// HTTP-status path instead and there is no exception to catch. A skip prints a
+// line and does not fail - this must not go red just because Unity is running.
+const { getQueueInfo, getTicketStatus } = await import("../src/unity-editor-bridge.js");
+
+async function assertWiredSite(label, fn, expectedSlug) {
+  const res = await fn();
+  const text = typeof res?.error === "string" ? res.error : "";
+  if (!text.startsWith("Error: ")) {
+    console.log(`  skip: ${label} — bridge appears reachable, no exception path to test`);
+    return;
+  }
+  if (!text.startsWith(`Error: ${expectedSlug}:`)) {
+    failures.push(
+      `FAIL: ${label} did not route through toolErrorText\n` +
+        `    expected prefix: Error: ${expectedSlug}:\n` +
+        `    got:             ${text}`
+    );
+    return;
+  }
+  if (HOME && text.toLowerCase().includes(HOME.toLowerCase())) {
+    failures.push(`FAIL: ${label} leaked the home path into a model-facing error:\n    ${text}`);
+    return;
+  }
+  pass++;
+}
+
+await assertWiredSite("getQueueInfo (bridge down)", () => getQueueInfo(), "queue-info-failed");
+await assertWiredSite(
+  "getTicketStatus (bridge down)",
+  () => getTicketStatus("no-such-ticket"),
+  "ticket-status-failed"
+);
+
 for (const f of failures) console.error(f);
 console.log(`tool-error-contract: ${pass}/${pass + failures.length} passed`);
 process.exit(failures.length === 0 ? 0 : 1);
