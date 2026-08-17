@@ -19,6 +19,7 @@
 //   receive project knowledge without needing to explicitly request it.
 
 import { randomBytes } from "crypto";
+import { createRequire } from "module";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -46,6 +47,13 @@ import {
 } from "./instance-discovery.js";
 import { debugLog } from "./state-persistence.js";
 import { CONFIG } from "./config.js";
+
+// Single source of truth for the version reported over the wire. Read from the
+// manifest rather than hardcoded: the literal had drifted to 2.26.0 while
+// package.json was at 2.28.2, so `initialize` advertised a two-release-old
+// version to every client. createRequire (not a JSON import attribute) because
+// package.json declares engines >=18, and import attributes need Node 22+.
+const SERVER_VERSION = createRequire(import.meta.url)("../package.json").version;
 import { isErrorResult, toolErrorText } from "./response-format.js";
 
 // ─── Response size protection ───
@@ -274,7 +282,7 @@ async function ensureInstanceDiscovery() {
 const server = new Server(
   {
     name: "unity-mcp",
-    version: "2.26.0",
+    version: SERVER_VERSION,
   },
   {
     capabilities: {
@@ -524,7 +532,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  debugLog(`=== SERVER START === v2.26.0, agent=${PROCESS_AGENT_ID}, discoveryDone=${_discoveryDonePerAgent.get(PROCESS_AGENT_ID) || false}, selectedPort=${getSelectedInstance()?.port || 'null'}`);
+  debugLog(`=== SERVER START === v${SERVER_VERSION}, agent=${PROCESS_AGENT_ID}, discoveryDone=${_discoveryDonePerAgent.get(PROCESS_AGENT_ID) || false}, selectedPort=${getSelectedInstance()?.port || 'null'}`);
   console.error(
     `Unity MCP Server running on stdio (agent: ${PROCESS_AGENT_ID})`
   );
