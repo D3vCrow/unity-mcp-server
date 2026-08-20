@@ -14,9 +14,6 @@ function getBridgeUrl() {
   return getActiveBridgeUrl();
 }
 
-// Legacy constant kept for backward compat in places that don't need dynamic routing
-const BRIDGE_URL = `http://${CONFIG.editorBridgeHost}:${CONFIG.editorBridgePort}`;
-
 // Agent identity â€" tracks which AI agent is making requests
 let _currentAgentId = "default";
 
@@ -213,11 +210,15 @@ async function submitToQueue(apiPath, bodyString) {
  */
 async function pollQueueStatus(ticketId) {
   let pollIntervalMs = CONFIG.queuePollIntervalMs;
-  const maxIntervalMs = Math.min(1000, CONFIG.queuePollMaxMs);
+  // Cap the growth of the poll interval at the configured max (default 1500ms). This used
+  // to be Math.min(1000, ...), which silently clamped the documented UNITY_QUEUE_POLL_MAX
+  // and the default to 1000.
+  const maxIntervalMs = CONFIG.queuePollMaxMs;
   const startTime = Date.now();
   // Use dedicated poll timeout (longer than bridge timeout to handle slow operations like execute_code)
   const timeoutMs = CONFIG.queuePollTimeoutMs || CONFIG.editorBridgeTimeout;
   let consecutive404s = 0;
+  let consecutiveTransient = 0;
   const max404Grace = 5; // Allow a few 404s during the dequeueâ†'execute race window
 
   while (true) {
@@ -255,22 +256,40 @@ async function pollQueueStatus(ticketId) {
         };
       }
 
-      // Reset 404 counter on successful poll
+      // Reset the 404 and transient-error counters on any successful poll response.
       consecutive404s = 0;
+      consecutiveTransient = 0;
 
       const statusData = await response.json();
 
       // Check completion status
       if (statusData.status === "Completed") {
-        // Extract result â€" use explicit undefined check so falsy values (null, 0, false, "") pass through
+        // Extract result — explicit undefined check so falsy results (null, 0, false, "") pass
+        // through. A ticket with NO result field completes with a minimal status object;
+        // returning the whole ticket here used to leak queue metadata into tool output.
         return {
           success: true,
-          data: statusData.result !== undefined ? statusData.result : statusData,
+          data: statusData.result !== undefined ? statusData.result : { status: "Completed" },
         };
       } else if (statusData.status === "Failed") {
+        // The queue ticket carries the Unity-side exception in `errorMessage`
+        // (MCPRequestQueue.TicketToDict) — reading only `error` here silently discarded
+        // EVERY real diagnostic and returned the generic fallback for all routes, which
+        // pushed agents into retrying non-idempotent writes blind. `error` is still
+        // accepted for the legacy synchronous shape.
         return {
           success: false,
-          error: statusData.error || "Queue processing failed",
+          error: statusData.errorMessage || statusData.error || "Queue processing failed",
+        };
+      } else if (statusData.status === "TimedOut") {
+        // Terminal on the plugin side — surface it now instead of polling a doomed ticket
+        // until it's evicted (which then reads back as a misleading 404 ~30-60s later).
+        return {
+          success: false,
+          error:
+            statusData.errorMessage ||
+            statusData.error ||
+            `Unity-side execution timed out for ticket ${ticketId}`,
         };
       }
 
@@ -283,6 +302,20 @@ async function pollQueueStatus(ticketId) {
         maxIntervalMs
       );
     } catch (error) {
+      // A transient poll failure (ECONNRESET/"fetch failed"/AbortError) commonly happens
+      // when the command triggered a domain reload that briefly drops the bridge — Unity
+      // still finishes the ticket. Failing here made the client retry a NON-idempotent
+      // command that already ran (duplicate GameObject, double package add). Keep polling
+      // through transient errors until the deadline; only give up on a non-transient one.
+      if (isTransientError(error, null)) {
+        consecutiveTransient++;
+        console.error(
+          `[MCP Bridge] Transient poll error for ticket ${ticketId} (${error.message}), retrying (${consecutiveTransient})...`
+        );
+        await sleep(pollIntervalMs);
+        pollIntervalMs = Math.min(Math.ceil(pollIntervalMs * 1.5), maxIntervalMs);
+        continue;
+      }
       return {
         success: false,
         error: toolErrorText("queue-poll-failed", error),
@@ -444,29 +477,35 @@ export async function sendCommand(command, params = {}) {
 
       // If we get here, queue submit failed after retries.
       if (submitLastError) {
-        // Connection error (bridge down / stalled / mid-reload): legacy mode would just repeat
-        // the same 5-retry wait against the same dead bridge — pure doubling of the latency.
-        // Fail fast instead. (A genuine "queue not supported" 404 was already handled above by
-        // switching to legacy inside the loop, so reaching here means a real connectivity issue.)
+        // Neither side latches the mode here. A TRANSIENT failure (editor not up yet, domain
+        // reload longer than the retry window, connection reset) is NOT evidence the plugin
+        // lacks queue mode — only the HTTP 404 above is. Latching downgraded the session
+        // permanently: legacy mode loses agent attribution, per-action undo grouping and
+        // read-batching, and nothing ever reset the flags.
+        //
+        // Where the two paths differ is what to do INSTEAD of latching. On a transient
+        // failure, falling back to legacy would just repeat the same retry wait against the
+        // same dead bridge — pure doubling of the latency — so fail fast and let the caller
+        // retry once Unity is back. The mode stays undetermined either way, so the next call
+        // re-probes for queue support.
         if (isTransientError(submitLastError, null)) {
+          const spent = retryBudgetFor(transientKind(submitLastError, null));
           return {
             success: false,
-            error: `Unity bridge unreachable after ${MAX_RETRIES} attempts: ${submitLastError.message}. It may be reloading or not running.`,
+            error: `Unity bridge unreachable after ${spent} attempts: ${submitLastError.message}. It may be reloading or not running.`,
           };
         }
+        // Non-transient: the bridge answered, just not usefully. Legacy is worth one shot
+        // for THIS call, mode still left undetermined.
         console.warn(
-          `[MCP Bridge] Queue mode failed (non-connection error), falling back to legacy sync mode: ${submitLastError.message}`
+          `[MCP Bridge] Queue submit failed (non-transient), using legacy sync for this call (mode left undetermined): ${submitLastError.message}`
         );
-        _queueModeDetermined = true;
-        _useQueueMode = false;
         return sendCommandLegacyMode(command, params);
       }
     } catch (error) {
       console.warn(
-        `[MCP Bridge] Unexpected error in queue mode, falling back to legacy: ${error.message}`
+        `[MCP Bridge] Unexpected error in queue mode, using legacy sync for this call (mode left undetermined): ${error.message}`
       );
-      _queueModeDetermined = true;
-      _useQueueMode = false;
       return sendCommandLegacyMode(command, params);
     }
   }
@@ -556,16 +595,19 @@ export async function getSceneInfo() {
   return sendCommand("scene/info");
 }
 
-export async function openScene(scenePath) {
-  return sendCommand("scene/open", { path: scenePath });
+export async function openScene(params) {
+  // Accepts the full param object so the unsaved-changes opt-ins (saveFirst /
+  // discardUnsavedChanges) reach the plugin; a bare string stays supported for callers
+  // that only pass a path.
+  return sendCommand("scene/open", typeof params === "string" ? { path: params } : params);
 }
 
-export async function saveScene() {
-  return sendCommand("scene/save");
+export async function saveScene(params = {}) {
+  return sendCommand("scene/save", params);
 }
 
-export async function newScene() {
-  return sendCommand("scene/new");
+export async function newScene(params = {}) {
+  return sendCommand("scene/new", params);
 }
 
 export async function getHierarchy(params) {
@@ -732,6 +774,10 @@ export async function getAnimationClipInfo(params) {
 
 export async function setAnimationClipCurve(params) {
   return sendCommand("animation/set-clip-curve", params);
+}
+
+export async function setAnimationObjectReferenceCurve(params) {
+  return sendCommand("animation/set-object-reference-curve", params);
 }
 
 export async function addAnimationLayer(params) {
@@ -1364,6 +1410,10 @@ export async function performUndo(params) {
   return sendCommand("undo/perform", params);
 }
 
+export async function undoLast(params) {
+  return sendCommand("undo/last", params);
+}
+
 export async function performRedo(params) {
   return sendCommand("undo/redo", params);
 }
@@ -1384,6 +1434,10 @@ export async function captureGameView(params) {
 
 export async function captureSceneView(params) {
   return sendCommand("screenshot/scene", params);
+}
+
+export async function captureEditorWindow(params) {
+  return sendCommand("screenshot/editor-window", params);
 }
 
 export async function getSceneViewInfo(params) {

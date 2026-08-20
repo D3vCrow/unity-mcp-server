@@ -32,6 +32,7 @@ import {
 import { hubTools } from "./tools/hub-tools.js";
 import { editorTools } from "./tools/editor-tools.js";
 import { umaTools } from "./tools/uma-tools.js";
+import { probuilderTools } from "./tools/probuilder-tools.js";
 import { contextTools } from "./tools/context-tools.js";
 import { instanceTools } from "./tools/instance-tools.js";
 import { splitToolTiers } from "./tool-tiers.js";
@@ -46,6 +47,7 @@ import {
   clearPortOverride,
 } from "./instance-discovery.js";
 import { debugLog } from "./state-persistence.js";
+import { isErrorText, firstSentence, stripSchemaDescriptions } from "./response-format.js";
 import { CONFIG } from "./config.js";
 
 // Single source of truth for the version reported over the wire. Read from the
@@ -118,7 +120,7 @@ setAgentId(PROCESS_AGENT_ID);
 // This keeps the tool count under ~70, preventing MCP client rejection caused by
 // oversized tool lists (268 tools / 125KB was ~5x beyond what clients handle).
 const { coreTools, metaTools, advancedCount, coreCount } =
-  splitToolTiers([...editorTools, ...umaTools]);
+  splitToolTiers([...editorTools, ...umaTools, ...probuilderTools]);
 const ALL_TOOLS = [
   ...instanceTools,
   ...hubTools,
@@ -279,6 +281,12 @@ async function ensureInstanceDiscovery() {
 }
 
 // ─── Create MCP Server ───
+// Version comes from SERVER_VERSION above, which reads package.json via
+// createRequire. origin/main added a second constant (PACKAGE_VERSION, readFileSync)
+// for the same single-source-of-truth fix — issue #27, a hardcoded copy that drifted
+// four releases behind. Both fixes are correct and one is enough; the readFileSync
+// import went with the duplicate.
+
 const server = new Server(
   {
     name: "unity-mcp",
@@ -315,31 +323,41 @@ const TOOLS_SKIP_PORT_INJECT = new Set([
   "unity_list_instances",
 ]);
 
+// ─── Compact tool registry mode (UNITY_MCP_COMPACT_TOOLS=1) ───
+// Some clients pass the aggregate tools/list payload through size-limited process
+// boundaries (Codex Desktop on Windows dies with spawn ENAMETOOLONG — issue #27).
+// Compact mode keeps every tool and its full schema STRUCTURE (types, required,
+// enums stay — strict clients still validate) but drops per-property prose and
+// trims tool descriptions to their first sentence. Full parameter documentation
+// remains available on demand via unity_list_advanced_tools' schema echo.
+const COMPACT_TOOLS = process.env.UNITY_MCP_COMPACT_TOOLS === "1";
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: ALL_TOOLS.map(({ name, description, inputSchema }) => {
+      let schema = inputSchema;
       // Inject port into unity_* tools that target an Editor instance
       if (
         name.startsWith("unity_") &&
         !name.startsWith("unity_hub_") &&
         !TOOLS_SKIP_PORT_INJECT.has(name)
       ) {
-        const augmented = {
-          ...inputSchema,
+        schema = {
+          ...schema,
           properties: {
-            ...(inputSchema.properties || {}),
+            ...(schema.properties || {}),
             port: {
               type: "number",
               description:
-                "Target Unity instance port for parallel-safe routing. " +
-                "Get this from unity_select_instance. When working with " +
-                "multiple Unity instances, ALWAYS include this parameter.",
+                "Unity instance port (from unity_select_instance). Always include it when multiple instances run.",
             },
           },
         };
-        return { name, description, inputSchema: augmented };
       }
-      return { name, description, inputSchema };
+      if (COMPACT_TOOLS) {
+        return { name, description: firstSentence(description), inputSchema: stripSchemaDescriptions(schema) };
+      }
+      return { name, description, inputSchema: schema };
     }),
   };
 });
@@ -365,7 +383,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       setAgentId(overrideId);
       setCurrentAgent(overrideId);
     } else {
-      // Ensure instance-discovery state targets this process's agent
+      // Reset BOTH the bridge agent id and the discovery agent to this process. Without
+      // the setAgentId reset, a prior request's _meta.agentId override leaked into the
+      // X-Agent-Id header of every later request (wrong queue attribution).
+      setAgentId(PROCESS_AGENT_ID);
       setCurrentAgent(PROCESS_AGENT_ID);
     }
 

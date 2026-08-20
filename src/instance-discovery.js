@@ -171,10 +171,15 @@ export async function validateSelectedInstance() {
     }
   }
 
-  // Project truly gone — not responding AND not in registry
-  debugLog(`Project "${saved.projectName}" no longer found. Clearing selection for agent ${_currentAgentId}.`);
+  // Project truly gone — not responding AND not in registry.
+  // FAIL CLOSED: this agent explicitly had a project selected and that project vanished.
+  // Clearing the flag to false let the very same tool call fall through to the default port,
+  // which in any multi-project session is a DIFFERENT live Unity — so a write intended for
+  // project A silently landed in project B and still reported success. Require an explicit
+  // re-selection instead.
+  debugLog(`Project "${saved.projectName}" no longer found. Clearing selection for agent ${_currentAgentId} and requiring re-selection.`);
   _agentInstances.delete(_currentAgentId);
-  _agentSelectionRequired.set(_currentAgentId, false);
+  _agentSelectionRequired.set(_currentAgentId, true);
   return null;
 }
 
@@ -282,8 +287,17 @@ export async function discoverInstances() {
           const port = entry.port;
           if (!port) return null;
 
-          const alive = await pingInstance(port);
-          return alive ? { ...entry, alive: true, source: "registry" } : null;
+          // Validation ping doubles as capability capture: the ping body carries
+          // protocolVersion/pluginVersion on newer plugins (absent = pre-handshake).
+          const info = await getInstanceInfo(port);
+          if (info === null) return null;
+          return {
+            ...entry,
+            protocolVersion: info.protocolVersion,
+            pluginVersion: info.pluginVersion,
+            alive: true,
+            source: "registry",
+          };
         })
       );
 
@@ -313,8 +327,8 @@ export async function discoverInstances() {
             unityVersion: info?.unityVersion || "",
             isClone: info?.isClone || false,
             cloneIndex: info?.cloneIndex ?? -1,
-            protocolVersion: info?.protocolVersion ?? null,
-            pluginVersion: info?.pluginVersion || null,
+            protocolVersion: info?.protocolVersion,
+            pluginVersion: info?.pluginVersion,
             alive: true,
             source: "portscan",
           };
@@ -353,8 +367,8 @@ export async function autoSelectInstance() {
         unityVersion: info?.unityVersion || "",
         isClone: false,
         cloneIndex: -1,
-        protocolVersion: info?.protocolVersion ?? null,
-        pluginVersion: info?.pluginVersion || null,
+        protocolVersion: info?.protocolVersion,
+        pluginVersion: info?.pluginVersion,
         alive: true,
         source: "default",
       };
@@ -523,9 +537,9 @@ async function getInstanceInfo(port) {
       unityVersion: data.unityVersion || data.version || null,
       isClone: data.isClone || false,
       cloneIndex: data.cloneIndex ?? -1,
-      // Capability handshake (server↔plugin drift): absent on pre-handshake plugins.
-      protocolVersion: data.protocolVersion ?? null,
-      pluginVersion: data.pluginVersion || null,
+      // Capability handshake fields (plugins >= protocolVersion 1; else undefined)
+      protocolVersion: typeof data.protocolVersion === "number" ? data.protocolVersion : undefined,
+      pluginVersion: typeof data.pluginVersion === "string" ? data.pluginVersion : undefined,
     };
   } catch {
     return null;

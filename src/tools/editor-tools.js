@@ -1,7 +1,65 @@
 ﻿// AnkleBreaker Unity MCP â€” Tool definitions for Unity Editor operations (via HTTP bridge)
 import * as bridge from "../unity-editor-bridge.js";
+import { formatResult, looksLikeErrorObject } from "../response-format.js";
+import { isUnknownRouteResult } from "../capabilities.js";
 
-import { formatResult } from "../response-format.js";
+// Shared shaping for image-returning graphics tools.
+// The bridge wraps plugin payloads as { success, data: { ..., base64 } } (queue mode)
+// but legacy mode and some code paths surface { ..., base64 } at the top level, so the
+// image is looked up at both depths. The base64 payload must NEVER remain inside the
+// metadata text block: a single leaked PNG is a multi-hundred-KB token bomb.
+function imageResultBlocks(result, noImageError) {
+  if (result.error) return formatResult(result);
+  const imageData = result.data?.base64 || result.base64;
+  if (!imageData || typeof imageData !== "string") {
+    // noImageError last so an empty-string result.error can't clobber the message.
+    return formatResult({ ...result, error: noImageError });
+  }
+  const metadata = { ...result };
+  delete metadata.base64;
+  if (metadata.data && typeof metadata.data === "object") {
+    metadata.data = { ...metadata.data };
+    delete metadata.data.base64;
+  }
+  const b64 = imageData.replace(/^data:image\/\w+;base64,/, "");
+  return [
+    { type: "image", data: b64, mimeType: "image/png" },
+    { type: "text", text: formatResult(metadata) },
+  ];
+}
+
+// Console entries ship a full multi-frame stack trace on EVERY entry — measured at
+// ~80% of a typical console payload, almost all of it noise for plain info logs.
+// Server-side stripping works against every plugin version. Policy: "errors" (default)
+// keeps a trimmed trace on error-like entries only; "all"/"none" override; frame cap
+// applies wherever a trace is kept. The plugin data is untouched — full traces remain
+// one explicit parameter away, so no capability is lost.
+const ERROR_LIKE_LOG_TYPES = new Set(["error", "exception", "assert"]);
+
+function shapeConsoleLogResult(result, includeStackTrace, maxStackFrames) {
+  const mode = includeStackTrace === "all" || includeStackTrace === "none" ? includeStackTrace : "errors";
+  const frameCap = Number.isInteger(maxStackFrames) && maxStackFrames > 0 ? maxStackFrames : 6;
+  const entries = result?.data?.entries;
+  if (!Array.isArray(entries)) return result;
+
+  const shaped = entries.map((entry) => {
+    if (!entry || typeof entry.stackTrace !== "string" || entry.stackTrace.length === 0) return entry;
+    const keep = mode === "all" || (mode === "errors" && ERROR_LIKE_LOG_TYPES.has(String(entry.type).toLowerCase()));
+    if (!keep) {
+      const { stackTrace, ...rest } = entry;
+      return rest;
+    }
+    const frames = entry.stackTrace.split("\n").filter((line) => line.trim().length > 0);
+    if (frames.length <= frameCap) return entry;
+    return {
+      ...entry,
+      stackTrace: `${frames.slice(0, frameCap).join("\n")}\n... (+${frames.length - frameCap} more frames; use includeStackTrace:"all" + maxStackFrames for the full trace)`,
+    };
+  });
+
+  return { ...result, data: { ...result.data, entries: shaped } };
+}
+
 import { enrichComponentSearch, enrichAssetSearch } from "../search-facets.js";
 import { callBatchWireWithFallback } from "../capabilities.js";
 import { getSelectedInstance } from "../instance-discovery.js";
@@ -30,37 +88,59 @@ export const editorTools = [
   },
   {
     name: "unity_scene_open",
-    description: "Open a scene by its asset path (relative to Assets/).",
+    description:
+      "Open a scene by its asset path (relative to Assets/). Refuses if any loaded scene has " +
+      "unsaved changes — pass saveFirst or discardUnsavedChanges.",
     inputSchema: {
       type: "object",
       properties: {
         path: { type: "string", description: "Scene asset path, e.g. 'Assets/Scenes/MainScene.unity'" },
+        saveFirst: { type: "boolean", description: "Save all modified scenes before switching." },
+        discardUnsavedChanges: { type: "boolean", description: "Proceed and LOSE unsaved changes." },
       },
       required: ["path"],
     },
-    handler: async ({ path }) => formatResult(await bridge.openScene(path)),
+    handler: async (params) => formatResult(await bridge.openScene(params)),
   },
   {
     name: "unity_scene_save",
-    description: "Save the current scene.",
-    inputSchema: { type: "object", properties: {} },
-    handler: async () => formatResult(await bridge.saveScene()),
+    description:
+      "Save the current scene. A never-saved scene requires `path` (saving without one would " +
+      "open Unity's interactive Save dialog).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Asset path to save to, e.g. 'Assets/Scenes/MyScene.unity'. Required for a scene that has never been saved; also acts as Save-As." },
+      },
+    },
+    handler: async (params) => formatResult(await bridge.saveScene(params)),
   },
   {
     name: "unity_scene_new",
-    description: "Create a new empty scene.",
-    inputSchema: { type: "object", properties: {} },
-    handler: async () => formatResult(await bridge.newScene()),
+    description:
+      "Create a new empty scene (REPLACES the current one). Refuses if any loaded scene has " +
+      "unsaved changes — pass saveFirst or discardUnsavedChanges.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        saveFirst: { type: "boolean", description: "Save all modified scenes first." },
+        discardUnsavedChanges: { type: "boolean", description: "Proceed and LOSE unsaved changes." },
+      },
+    },
+    handler: async (params) => formatResult(await bridge.newScene(params)),
   },
   {
     name: "unity_scene_hierarchy",
-    description: "Get the full hierarchy tree of all GameObjects in the active scene, including their components and children.",
+    description:
+      "Get the hierarchy tree of all GameObjects in the active scene, including their components and children. " +
+      "Dense by default: per-node fields at their default value (active=true, tag=Untagged, layer=Default, origin position, Transform) are omitted — an absent field means the default.",
     inputSchema: {
       type: "object",
       properties: {
         maxDepth: { type: "number", description: "Maximum depth to traverse (default: 10)" },
         maxNodes: { type: "number", description: "Maximum total nodes to return (default: 5000). Use lower values for very large scenes to avoid timeouts." },
         parentPath: { type: "string", description: "Only return hierarchy under this GameObject path (e.g. 'Canvas/Panel'). Useful for exploring specific subtrees in large scenes." },
+        verbose: { type: "boolean", description: "Emit every per-node field even at default values (the pre-2.37 shape)." },
       },
     },
     handler: async (params) => formatResult(await bridge.getHierarchy(params)),
@@ -99,12 +179,15 @@ export const editorTools = [
   },
   {
     name: "unity_gameobject_delete",
-    description: "Delete a GameObject from the scene by path or name.",
+    description:
+      "Delete a GameObject by path or name. Refuses if its runtime mesh is shared by other " +
+      "objects (ProBuilder clones) — reports sharedWith; pass force:true to override.",
     inputSchema: {
       type: "object",
       properties: {
         path: { type: "string", description: "Hierarchy path or name of the GameObject to delete" },
-        instanceId: { type: "number", description: "Instance ID (alternative to path)" },
+        instanceId: { type: "string", description: "Instance ID (alternative to path)" },
+        force: { type: "boolean", description: "Delete even when the runtime mesh is shared by other objects (ProBuilder clones). Default false." },
       },
     },
     handler: async (params) => formatResult(await bridge.deleteGameObject(params)),
@@ -116,7 +199,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "Hierarchy path or name" },
-        instanceId: { type: "number", description: "Instance ID (alternative to path)" },
+        instanceId: { type: "string", description: "Instance ID (alternative to path)" },
       },
     },
     handler: async (params) => formatResult(await bridge.getGameObjectInfo(params)),
@@ -128,7 +211,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "Hierarchy path or name" },
-        instanceId: { type: "number", description: "Instance ID (alternative)" },
+        instanceId: { type: "string", description: "Instance ID (alternative)" },
         position: { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, z: { type: "number" } } },
         rotation: { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, z: { type: "number" } } },
         scale: { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, z: { type: "number" } } },
@@ -188,7 +271,7 @@ export const editorTools = [
         gameObjectPath: { type: "string", description: "Path or name of target GameObject" },
         componentType: { type: "string", description: "Component type name" },
         propertyName: { type: "string", description: "Name of the property to set" },
-        value: { description: "Value to set (type depends on property). For ObjectReference: string asset path, string scene object name, null, or {assetPath?, instanceId?, gameObject?, componentType?}" },
+        value: { type: ["string", "number", "boolean", "object", "array", "null"], description: "Value to set. ObjectReference accepts: asset path, scene object name, null, or {assetPath?, instanceId?, gameObject?, componentType?}" },
       },
       required: ["gameObjectPath", "componentType", "propertyName", "value"],
     },
@@ -214,18 +297,18 @@ export const editorTools = [
   },
   {
     name: "unity_component_set_reference",
-    description: "Set an object reference on a component property. Dedicated tool for wiring references between GameObjects, components, and assets. More powerful than set_property for ObjectReference fields â€” supports resolution by asset path, scene GameObject name, component type, or instance ID.",
+    description: "Wire an object reference on a component property. Resolves by asset path, scene GameObject name, component type, or instance ID (richer than set_property for ObjectReference fields).",
     inputSchema: {
       type: "object",
       properties: {
         path: { type: "string", description: "Hierarchy path or name of the target GameObject" },
-        instanceId: { type: "number", description: "Instance ID of the target GameObject (alternative to path)" },
+        instanceId: { type: "string", description: "Instance ID of the target GameObject (alternative to path)" },
         componentType: { type: "string", description: "Component type containing the property (optional â€” will auto-search all components)" },
         propertyName: { type: "string", description: "Name of the ObjectReference property to set" },
         assetPath: { type: "string", description: "Asset path to assign (e.g. 'Assets/Materials/MyMat.mat', 'Assets/Prefabs/Enemy.prefab')" },
         referenceGameObject: { type: "string", description: "Name or hierarchy path of a scene GameObject to assign" },
         referenceComponentType: { type: "string", description: "When referencing a scene object, get a specific component instead of the GameObject itself (e.g. 'Camera', 'AudioSource')" },
-        referenceInstanceId: { type: "number", description: "Instance ID of the object to assign" },
+        referenceInstanceId: { type: "string", description: "Instance ID of the object to assign (64-bit-safe string)" },
         clear: { type: "boolean", description: "Set to true to clear/null the reference" },
       },
       required: ["propertyName"],
@@ -234,7 +317,7 @@ export const editorTools = [
   },
   {
     name: "unity_component_batch_wire",
-    description: "Wire multiple object references in a single call. Efficient for setting up many references at once (e.g. wiring a UI manager to all its panels, connecting enemy AI to patrol waypoints). Each entry specifies a target GameObject, property, and reference to assign.",
+    description: "Wire multiple object references in one call (e.g. a manager to all its panels). Each entry: target GameObject, property, reference to assign.",
     inputSchema: {
       type: "object",
       properties: {
@@ -245,13 +328,13 @@ export const editorTools = [
             type: "object",
             properties: {
               path: { type: "string", description: "Target GameObject path or name" },
-              instanceId: { type: "number", description: "Target GameObject instance ID" },
+              instanceId: { type: "string", description: "Target GameObject instance ID" },
               componentType: { type: "string", description: "Component type (optional)" },
               propertyName: { type: "string", description: "Property name to set" },
               assetPath: { type: "string", description: "Asset path to assign" },
               referenceGameObject: { type: "string", description: "Scene GameObject to assign" },
               referenceComponentType: { type: "string", description: "Component type on the referenced GameObject" },
-              referenceInstanceId: { type: "number", description: "Instance ID to assign" },
+              referenceInstanceId: { type: "string", description: "Instance ID to assign (64-bit-safe string)" },
               clear: { type: "boolean", description: "Clear the reference" },
             },
             required: ["propertyName"],
@@ -272,7 +355,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "Target GameObject path or name" },
-        instanceId: { type: "number", description: "Target GameObject instance ID" },
+        instanceId: { type: "string", description: "Target GameObject instance ID" },
         componentType: { type: "string", description: "Component type containing the property" },
         propertyName: { type: "string", description: "ObjectReference property name to inspect" },
         maxResults: { type: "number", description: "Maximum results to return (default: 50)" },
@@ -306,6 +389,7 @@ export const editorTools = [
       properties: {
         sourcePath: { type: "string", description: "Absolute path to the source file on disk" },
         destinationPath: { type: "string", description: "Destination path inside Assets/ folder" },
+        overwrite: { type: "boolean", description: "Replace an existing asset at the destination (default false)." },
       },
       required: ["sourcePath", "destinationPath"],
     },
@@ -313,11 +397,15 @@ export const editorTools = [
   },
   {
     name: "unity_asset_delete",
-    description: "Delete an asset from the project.",
+    description:
+      "Delete an asset — to the OS trash by default (NOT undoable via unity_undo_last). " +
+      "Deleting a FOLDER is recursive and refuses without recursive:true.",
     inputSchema: {
       type: "object",
       properties: {
         path: { type: "string", description: "Asset path relative to project root (e.g. 'Assets/Scripts/MyScript.cs')" },
+        recursive: { type: "boolean", description: "Required to delete a FOLDER and its contents. Default false refuses, reporting the asset count." },
+        permanent: { type: "boolean", description: "Hard-delete instead of OS trash. Default false." },
       },
       required: ["path"],
     },
@@ -363,6 +451,7 @@ export const editorTools = [
         path: { type: "string", description: "Asset path for the script (e.g. 'Assets/Scripts/PlayerController.cs')" },
         content: { type: "string", description: "Full C# source code content" },
         className: { type: "string", description: "Class name (defaults to filename without extension)" },
+        overwrite: { type: "boolean", description: "Replace an existing script (default false). Use unity_script_update to edit." },
       },
       required: ["path", "content"],
     },
@@ -417,6 +506,7 @@ export const editorTools = [
         shader: { type: "string", description: "Shader name (e.g. 'Standard', 'Universal Render Pipeline/Lit')" },
         color: { type: "object", properties: { r: { type: "number" }, g: { type: "number" }, b: { type: "number" }, a: { type: "number" } } },
         properties: { type: "object", description: "Additional shader properties as key-value pairs" },
+        overwrite: { type: "boolean", description: "Replace an existing material (default false)." },
       },
       required: ["path"],
     },
@@ -465,15 +555,25 @@ export const editorTools = [
   // â”€â”€â”€ Console / Logging â”€â”€â”€
   {
     name: "unity_console_log",
-    description: "Get recent Unity console log messages (errors, warnings, info). Useful for debugging.",
+    description: "Get recent Unity console log messages (errors, warnings, info).",
     inputSchema: {
       type: "object",
       properties: {
         count: { type: "number", description: "Number of recent messages to retrieve (default: 50)" },
         type: { type: "string", description: "Filter: 'error', 'warning', 'info', or 'all' (default: 'all')" },
+        includeStackTrace: {
+          type: "string",
+          enum: ["errors", "all", "none"],
+          description: "Traces to keep: 'errors' (default, error-like entries only, trimmed), 'all', 'none'.",
+        },
+        maxStackFrames: { type: "number", description: "Frames kept per retained trace (default: 6)" },
       },
     },
-    handler: async (params) => formatResult(await bridge.getConsoleLog(params)),
+    handler: async (params) => {
+      const { includeStackTrace, maxStackFrames, ...bridgeParams } = params || {};
+      const result = await bridge.getConsoleLog(bridgeParams);
+      return formatResult(shapeConsoleLogResult(result, includeStackTrace, maxStackFrames));
+    },
   },
   {
     name: "unity_console_clear",
@@ -487,11 +587,8 @@ export const editorTools = [
   {
     name: "unity_get_compilation_errors",
     description:
-      "Get C# compilation errors and warnings from the Unity Editor. " +
-      "Uses CompilationPipeline directly — independent of the console log buffer. " +
-      "Not affected by console clear or Play Mode log flooding. " +
-      "Returns errors from the last compilation cycle. " +
-      "Use this instead of unity_console_log when diagnosing script compilation issues.",
+      "Get C# compilation errors/warnings via CompilationPipeline — independent of the console buffer " +
+      "(survives console clear and log flooding). Prefer this over unity_console_log for compile issues.",
     inputSchema: {
       type: "object",
       properties: {
@@ -513,7 +610,41 @@ export const editorTools = [
       },
       required: ["action"],
     },
-    handler: async ({ action }) => formatResult(await bridge.playMode(action)),
+    handler: async ({ action }) => {
+      const result = await bridge.playMode(action);
+      // Entering/exiting play mode triggers a domain reload that evicts queue tickets —
+      // the status poll then 404s while the mode switch actually happened (a false
+      // negative). Before propagating that specific failure, verify the editor state:
+      // if it matches the requested action, the operation succeeded.
+      const ticketLost =
+        result && result.success === false &&
+        /HTTP 404|not found or expired/i.test(result.error || "");
+      if (ticketLost) {
+        try {
+          const state = await bridge.getEditorState();
+          const s = state && state.data !== undefined ? state.data : state;
+          const confirmed =
+            (action === "play" && s.isPlaying === true) ||
+            (action === "stop" && s.isPlaying === false) ||
+            (action === "pause" && s.isPaused === true);
+          if (confirmed) {
+            return formatResult({
+              success: true,
+              data: {
+                action,
+                isPlaying: s.isPlaying,
+                isPaused: s.isPaused,
+                verifiedViaEditorState: true,
+                note: "The play-mode domain reload evicted the queue ticket; the editor state confirms the switch happened.",
+              },
+            });
+          }
+        } catch (_) {
+          // State check unavailable — fall through to the original error.
+        }
+      }
+      return formatResult(result);
+    },
   },
 
   // â”€â”€â”€ Editor Menu â”€â”€â”€
@@ -546,6 +677,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "Asset path for the controller (e.g. 'Assets/Animations/PlayerController.controller')" },
+        overwrite: { type: "boolean", description: "Replace an existing controller at this path (default false: refuse, to avoid losing its states/transitions)." },
       },
       required: ["path"],
     },
@@ -572,7 +704,7 @@ export const editorTools = [
         controllerPath: { type: "string", description: "Asset path of the Animator Controller" },
         parameterName: { type: "string", description: "Name of the parameter to add" },
         parameterType: { type: "string", enum: ["Float", "Int", "Bool", "Trigger"], description: "Type of the parameter" },
-        defaultValue: { description: "Default value for the parameter (not applicable to Trigger)" },
+        defaultValue: { type: ["string", "number", "boolean", "null"], description: "Default value for the parameter (not applicable to Trigger)" },
       },
       required: ["controllerPath", "parameterName", "parameterType"],
     },
@@ -664,6 +796,7 @@ export const editorTools = [
         path: { type: "string", description: "Asset path for the clip (e.g. 'Assets/Animations/Walk.anim')" },
         loop: { type: "boolean", description: "Whether the clip should loop (default: false)" },
         frameRate: { type: "number", description: "Frame rate (default: 60)" },
+        overwrite: { type: "boolean", description: "Replace an existing clip at this path (default false: refuse, to avoid wiping its curves)." },
       },
       required: ["path"],
     },
@@ -708,6 +841,37 @@ export const editorTools = [
     handler: async (params) => formatResult(await bridge.setAnimationClipCurve(params)),
   },
   {
+    name: "unity_animation_set_object_reference_curve",
+    description:
+      "Set an OBJECT-REFERENCE (PPtr) animation curve — the curve type Unity uses for 2D sprite-frame " +
+      "animation (SpriteRenderer.m_Sprite). unity_animation_set_clip_curve only handles float curves. " +
+      "Each keyframe names an asset path; for a sliced sprite sheet add `name` to pick a specific sprite " +
+      "sub-asset. Fails closed if any keyframe can't be resolved, so a clip is never half-wired.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        clipPath: { type: "string", description: "Asset path of the Animation Clip" },
+        relativePath: { type: "string", description: "Path to the animated child object (empty for the root)" },
+        propertyName: { type: "string", description: "Property to animate (default 'm_Sprite')" },
+        type: { type: "string", description: "Component type (default 'SpriteRenderer')" },
+        keyframes: {
+          type: "array",
+          description: "Ordered keyframes; each { time, assetPath, name? }",
+          items: {
+            type: "object",
+            properties: {
+              time: { type: "number", description: "Time in seconds" },
+              assetPath: { type: "string", description: "Asset path of the referenced object (e.g. the sprite sheet)" },
+              name: { type: "string", description: "Sub-asset name — required to pick one sprite out of a sliced sheet" },
+            },
+          },
+        },
+      },
+      required: ["clipPath", "keyframes"],
+    },
+    handler: async (params) => formatResult(await bridge.setAnimationObjectReferenceCurve(params)),
+  },
+  {
     name: "unity_animation_add_layer",
     description: "Add a new layer to an Animator Controller.",
     inputSchema: {
@@ -728,7 +892,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "Hierarchy path or name of the target GameObject" },
-        instanceId: { type: "number", description: "Instance ID (alternative to path)" },
+        instanceId: { type: "string", description: "Instance ID (alternative to path)" },
         controllerPath: { type: "string", description: "Asset path of the Animator Controller to assign" },
       },
       required: ["controllerPath"],
@@ -951,7 +1115,7 @@ export const editorTools = [
       properties: {
         assetPath: { type: "string", description: "Asset path of the prefab (e.g. 'Assets/Prefabs/Player.prefab')" },
         path: { type: "string", description: "Hierarchy path of a prefab instance in the scene" },
-        instanceId: { type: "number", description: "Instance ID of a prefab instance" },
+        instanceId: { type: "string", description: "Instance ID of a prefab instance" },
       },
     },
     handler: async (params) => formatResult(await bridge.getPrefabInfo(params)),
@@ -976,7 +1140,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "Hierarchy path of the prefab instance" },
-        instanceId: { type: "number", description: "Instance ID (alternative to path)" },
+        instanceId: { type: "string", description: "Instance ID (alternative to path)" },
       },
     },
     handler: async (params) => formatResult(await bridge.applyPrefabOverrides(params)),
@@ -988,7 +1152,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "Hierarchy path of the prefab instance" },
-        instanceId: { type: "number", description: "Instance ID (alternative to path)" },
+        instanceId: { type: "string", description: "Instance ID (alternative to path)" },
       },
     },
     handler: async (params) => formatResult(await bridge.revertPrefabOverrides(params)),
@@ -1000,7 +1164,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "Hierarchy path of the prefab instance" },
-        instanceId: { type: "number", description: "Instance ID (alternative to path)" },
+        instanceId: { type: "string", description: "Instance ID (alternative to path)" },
         completely: { type: "boolean", description: "If true, unpack completely including nested prefabs (default: false)" },
       },
     },
@@ -1008,12 +1172,12 @@ export const editorTools = [
   },
   {
     name: "unity_set_object_reference",
-    description: "[LEGACY â€” prefer unity_component_set_reference] Set an object reference property on a component via the prefab system. Use unity_component_set_reference instead for richer resolution options.",
+    description: "[LEGACY] Set an object reference on a component. Prefer unity_component_set_reference (richer resolution).",
     inputSchema: {
       type: "object",
       properties: {
         path: { type: "string", description: "Hierarchy path of the target GameObject" },
-        instanceId: { type: "number", description: "Instance ID (alternative to path)" },
+        instanceId: { type: "string", description: "Instance ID (alternative to path)" },
         componentType: { type: "string", description: "Component type name (optional - will search all components)" },
         propertyName: { type: "string", description: "Name of the ObjectReference property to set" },
         referencePath: { type: "string", description: "Asset path of the reference (for assets like prefabs, materials, textures)" },
@@ -1030,7 +1194,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "Hierarchy path or name of the GameObject to duplicate" },
-        instanceId: { type: "number", description: "Instance ID (alternative to path)" },
+        instanceId: { type: "string", description: "Instance ID (alternative to path)" },
         newName: { type: "string", description: "Name for the duplicate (default: original name + ' (Copy)')" },
       },
     },
@@ -1043,7 +1207,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "Hierarchy path or name of the GameObject" },
-        instanceId: { type: "number", description: "Instance ID (alternative to path)" },
+        instanceId: { type: "string", description: "Instance ID (alternative to path)" },
         active: { type: "boolean", description: "Whether the GameObject should be active" },
       },
       required: ["active"],
@@ -1057,7 +1221,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "Hierarchy path or name of the GameObject to move" },
-        instanceId: { type: "number", description: "Instance ID (alternative to path)" },
+        instanceId: { type: "string", description: "Instance ID (alternative to path)" },
         newParent: { type: "string", description: "Path of the new parent (empty string for scene root)" },
         worldPositionStays: { type: "boolean", description: "Maintain world position after reparenting (default: true)" },
       },
@@ -1103,7 +1267,7 @@ export const editorTools = [
         prefabPath: { type: "string", description: "Path within the prefab hierarchy (e.g. 'Body/Head'). Empty = root." },
         componentType: { type: "string", description: "Component type name" },
         propertyName: { type: "string", description: "Name of the property to set" },
-        value: { description: "Value to set (type depends on property)" },
+        value: { type: ["string", "number", "boolean", "object", "array", "null"], description: "Value to set (type depends on property)" },
       },
       required: ["assetPath", "componentType", "propertyName"],
     },
@@ -1423,7 +1587,7 @@ export const editorTools = [
       properties: {
         name: { type: "string", description: "Name for new GameObject (if not attaching to existing)" },
         path: { type: "string", description: "Path of existing GameObject to attach AudioSource to" },
-        instanceId: { type: "integer", description: "Instance ID of existing GameObject" },
+        instanceId: { type: "string", description: "Instance ID of existing GameObject" },
         clipPath: { type: "string", description: "Asset path to AudioClip (e.g. 'Assets/Audio/music.wav')" },
         volume: { type: "number", description: "Volume (0-1)" },
         pitch: { type: "number", description: "Pitch multiplier" },
@@ -1476,7 +1640,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "GameObject path" },
-        instanceId: { type: "integer", description: "GameObject instance ID" },
+        instanceId: { type: "string", description: "GameObject instance ID" },
         tag: { type: "string", description: "Tag to assign" },
       },
       required: ["tag"],
@@ -1490,7 +1654,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "GameObject path" },
-        instanceId: { type: "integer", description: "GameObject instance ID" },
+        instanceId: { type: "string", description: "GameObject instance ID" },
         layer: { type: "integer", description: "Layer index (0-31)" },
         layerName: { type: "string", description: "Layer name (alternative to index)" },
         includeChildren: { type: "boolean", description: "Apply to all children recursively" },
@@ -1505,7 +1669,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "GameObject path" },
-        instanceId: { type: "integer", description: "GameObject instance ID" },
+        instanceId: { type: "string", description: "GameObject instance ID" },
         isStatic: { type: "boolean", description: "True to mark static" },
         includeChildren: { type: "boolean", description: "Apply to all children recursively" },
       },
@@ -1528,7 +1692,7 @@ export const editorTools = [
       properties: {
         path: { type: "string", description: "Single GameObject path to select" },
         paths: { type: "array", items: { type: "string" }, description: "Multiple GameObject paths to select" },
-        instanceId: { type: "integer", description: "Instance ID of GameObject to select" },
+        instanceId: { type: "string", description: "Instance ID of GameObject to select" },
       },
     },
     handler: async (params) => formatResult(await bridge.setSelection(params)),
@@ -1540,7 +1704,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "GameObject to frame in scene view" },
-        instanceId: { type: "integer", description: "Instance ID of GameObject to frame" },
+        instanceId: { type: "string", description: "Instance ID of GameObject to frame" },
         position: { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, z: { type: "number" } }, description: "Scene view pivot position" },
         rotation: { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, z: { type: "number" } }, description: "Scene view rotation (euler angles)" },
         size: { type: "number", description: "Scene view zoom (camera distance)" },
@@ -2050,7 +2214,8 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "Asset path for the new shader graph (e.g. 'Assets/Shaders/MyShader.shadergraph')" },
-        template: { type: "string", description: "Template type: urp_lit, urp_unlit, urp_sprite_lit, urp_sprite_unlit, urp_decal, hdrp_lit, hdrp_unlit, blank (default: urp_lit)" },
+        template: { type: "string", description: "Template: urp_lit, urp_unlit, urp_sprite_lit, urp_sprite_unlit, or blank (target-less). Default urp_lit. Builds a valid graph via the real ShaderGraph API." },
+        overwrite: { type: "boolean", description: "Replace an existing graph at this path (default false: refuse)." },
       },
       required: ["path"],
     },
@@ -2185,7 +2350,7 @@ export const editorTools = [
         path: { type: "string", description: "Asset path of the .shadergraph file" },
         nodeId: { type: "string", description: "Target node objectId" },
         propertyName: { type: "string", description: "Property name in the serialized JSON (e.g., 'm_Value', 'm_DefaultValue')" },
-        value: { description: "New value â€” string, number, or boolean depending on the property" },
+        value: { type: ["string", "number", "boolean"], description: "New value â€” string, number, or boolean depending on the property" },
       },
       required: ["path", "nodeId", "propertyName", "value"],
     },
@@ -2658,9 +2823,23 @@ export const editorTools = [
   // â”€â”€â”€ Undo â”€â”€â”€
   {
     name: "unity_undo",
-    description: "Undo the last operation in Unity Editor.",
+    description: "Undo the single most recent step on Unity's global undo stack (Ctrl+Z). To revert a specific MCP action, prefer unity_undo_last.",
     inputSchema: { type: "object", properties: {} },
     handler: async (params) => formatResult(await bridge.performUndo(params)),
+  },
+  {
+    name: "unity_undo_last",
+    description:
+      "Revert the most recent undoable MCP action as a whole (create/edit/boolean, not one internal step — each write runs in its own named undo group). With agentId, targets that agent's most recent action. " +
+      "Unity's undo is LINEAR: reverting an action also reverts anything newer stacked on it, so this refuses to cascade and lists what would be affected unless force:true. (execute-code and reads are never targets.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agentId: { type: "string", description: "Optional: revert this agent's most recent action instead of the global newest (see unity_undo_history for ids)." },
+        force: { type: "boolean", description: "Also revert newer actions stacked on top of the target (Unity's linear undo). Default false." },
+      },
+    },
+    handler: async (params) => formatResult(await bridge.undoLast(params)),
   },
   {
     name: "unity_redo",
@@ -2670,8 +2849,14 @@ export const editorTools = [
   },
   {
     name: "unity_undo_history",
-    description: "Get information about the current undo group.",
-    inputSchema: { type: "object", properties: {} },
+    description: "List recent MCP actions with undo state: per-agent attribution, whether each is still undoable, target, and the current undo group. Use it to decide what unity_undo_last reverts or to pick an agentId.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        count: { type: "number", description: "Max actions to return, newest first (default 20)." },
+        agentId: { type: "string", description: "Optional: only show actions from this agent." },
+      },
+    },
     handler: async (params) => formatResult(await bridge.getUndoHistory(params)),
   },
   {
@@ -2711,6 +2896,24 @@ export const editorTools = [
       },
     },
     handler: async (params) => formatResult(await bridge.captureSceneView(params)),
+  },
+  {
+    name: "unity_screenshot_editor_window",
+    description:
+      "Capture a specific Editor window (Inspector, Project, Console, custom) to a PNG file via Win32 PrintWindow — works even when occluded, no focus steal. " +
+      "USE ONLY ON EXPLICIT USER REQUEST — never proactively or for your own inspection. " +
+      "WINDOWS EDITOR ONLY: on macOS/Linux it returns { success:false, platform } — do not retry, tell the user it's unavailable there. " +
+      "For game/scene views use unity_screenshot_game / unity_screenshot_scene (cross-platform).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        window: { type: "string", description: "EditorWindow type FullName (e.g. 'UnityEditor.InspectorWindow'), simple type name, or tab title." },
+        path: { type: "string", description: "Save path ending in .png (default: Assets/Screenshots/EditorWindow_<time>.png)." },
+        maxDimension: { type: "number", description: "Max pixels per side (default 8192, clamped to GPU max)." },
+      },
+      required: ["window"],
+    },
+    handler: async (params) => formatResult(await bridge.captureEditorWindow(params)),
   },
   {
     name: "unity_sceneview_info",
@@ -2761,16 +2964,8 @@ export const editorTools = [
       },
       required: ["assetPath"],
     },
-    handler: async (params) => {
-      const result = await bridge.captureAssetPreview(params);
-      if (result.error) return formatResult(result);
-      const metadata = { ...result };
-      delete metadata.base64;
-      return [
-        { type: "image", data: result.base64, mimeType: "image/png" },
-        { type: "text", text: formatResult(metadata) },
-      ];
-    },
+    handler: async (params) =>
+      imageResultBlocks(await bridge.captureAssetPreview(params), "Asset preview returned no image data"),
   },
   {
     name: "unity_graphics_scene_capture",
@@ -2789,23 +2984,8 @@ export const editorTools = [
         },
       },
     },
-    handler: async (params) => {
-      const result = await bridge.captureSceneViewGraphics(params);
-      if (result.error) return formatResult(result);
-      // Bridge wraps response: { success, data: { success, base64 } }
-      const imageData = result.data?.base64 || result.base64;
-      if (!imageData || typeof imageData !== "string") {
-        return formatResult({ error: "Scene capture returned no image data", ...result });
-      }
-      const metadata = { ...result };
-      delete metadata.base64;
-      if (metadata.data) delete metadata.data.base64;
-      const b64 = imageData.replace(/^data:image\/\w+;base64,/, "");
-      return [
-        { type: "image", data: b64, mimeType: "image/png" },
-        { type: "text", text: formatResult(metadata) },
-      ];
-    },
+    handler: async (params) =>
+      imageResultBlocks(await bridge.captureSceneViewGraphics(params), "Scene capture returned no image data"),
   },
   {
     name: "unity_graphics_game_capture",
@@ -2829,23 +3009,8 @@ export const editorTools = [
         },
       },
     },
-    handler: async (params) => {
-      const result = await bridge.captureGameViewGraphics(params);
-      if (result.error) return formatResult(result);
-      // Bridge wraps response: { success, data: { success, base64 } }
-      const imageData = result.data?.base64 || result.base64;
-      if (!imageData || typeof imageData !== "string") {
-        return formatResult({ error: "Game capture returned no image data", ...result });
-      }
-      const metadata = { ...result };
-      delete metadata.base64;
-      if (metadata.data) delete metadata.data.base64;
-      const b64 = imageData.replace(/^data:image\/\w+;base64,/, "");
-      return [
-        { type: "image", data: b64, mimeType: "image/png" },
-        { type: "text", text: formatResult(metadata) },
-      ];
-    },
+    handler: async (params) =>
+      imageResultBlocks(await bridge.captureGameViewGraphics(params), "Game capture returned no image data"),
   },
   {
     name: "unity_graphics_prefab_render",
@@ -2884,16 +3049,8 @@ export const editorTools = [
       },
       required: ["assetPath"],
     },
-    handler: async (params) => {
-      const result = await bridge.renderPrefabPreview(params);
-      if (result.error) return formatResult(result);
-      const metadata = { ...result };
-      delete metadata.base64;
-      return [
-        { type: "image", data: result.base64, mimeType: "image/png" },
-        { type: "text", text: formatResult(metadata) },
-      ];
-    },
+    handler: async (params) =>
+      imageResultBlocks(await bridge.renderPrefabPreview(params), "Prefab render returned no image data"),
   },
   {
     name: "unity_graphics_mesh_info",
@@ -2948,16 +3105,10 @@ export const editorTools = [
     },
     handler: async (params) => {
       const result = await bridge.getMaterialInfo(params);
-      if (result.error) return formatResult(result);
-      if (result.base64) {
-        const metadata = { ...result };
-        delete metadata.base64;
-        return [
-          { type: "image", data: result.base64, mimeType: "image/png" },
-          { type: "text", text: formatResult(metadata) },
-        ];
-      }
-      return formatResult(result);
+      const hasImage = typeof (result.data?.base64 || result.base64) === "string";
+      return hasImage
+        ? imageResultBlocks(result, "Material preview returned no image data")
+        : formatResult(result);
     },
   },
   {
@@ -2982,16 +3133,10 @@ export const editorTools = [
     },
     handler: async (params) => {
       const result = await bridge.getTextureInfoGraphics(params);
-      if (result.error) return formatResult(result);
-      if (result.base64) {
-        const metadata = { ...result };
-        delete metadata.base64;
-        return [
-          { type: "image", data: result.base64, mimeType: "image/png" },
-          { type: "text", text: formatResult(metadata) },
-        ];
-      }
-      return formatResult(result);
+      const hasImage = typeof (result.data?.base64 || result.base64) === "string";
+      return hasImage
+        ? imageResultBlocks(result, "Texture preview returned no image data")
+        : formatResult(result);
     },
   },
   {
@@ -3043,6 +3188,7 @@ export const editorTools = [
         heightmapResolution: { type: "number", description: "Heightmap resolution, must be power of 2 + 1 (default: 513)" },
         position: { type: "object", description: "World position { x, y, z }", properties: { x: { type: "number" }, y: { type: "number" }, z: { type: "number" } } },
         dataPath: { type: "string", description: "Path to save terrain data asset (default: Assets/TerrainName_Data.asset)" },
+        overwrite: { type: "boolean", description: "Replace existing terrain data at dataPath (default false: refuse, to avoid wiping a sculpted terrain)." },
       },
     },
     handler: async (params) => formatResult(await bridge.createTerrain(params)),
@@ -3544,7 +3690,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "GameObject path" },
-        instanceId: { type: "number", description: "Instance ID (alternative)" },
+        instanceId: { type: "string", description: "Instance ID (alternative)" },
       },
     },
     handler: async (params) => formatResult(await bridge.getParticleSystemInfo(params)),
@@ -3556,7 +3702,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "GameObject path" },
-        instanceId: { type: "number", description: "Instance ID (alternative)" },
+        instanceId: { type: "string", description: "Instance ID (alternative)" },
         duration: { type: "number" }, loop: { type: "boolean" },
         startLifetime: { type: "number" }, startSpeed: { type: "number" },
         startSize: { type: "number" }, startRotation: { type: "number" },
@@ -3574,7 +3720,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "GameObject path" },
-        instanceId: { type: "number", description: "Instance ID (alternative)" },
+        instanceId: { type: "string", description: "Instance ID (alternative)" },
         enabled: { type: "boolean" },
         rateOverTime: { type: "number", description: "Particles emitted per second" },
         rateOverDistance: { type: "number", description: "Particles emitted per unit distance" },
@@ -3589,7 +3735,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "GameObject path" },
-        instanceId: { type: "number", description: "Instance ID (alternative)" },
+        instanceId: { type: "string", description: "Instance ID (alternative)" },
         enabled: { type: "boolean" },
         shapeType: { type: "string", description: "Shape type: Sphere, Hemisphere, Cone, Box, Circle, Edge, Rectangle, etc." },
         radius: { type: "number" }, angle: { type: "number" },
@@ -3605,7 +3751,7 @@ export const editorTools = [
       type: "object",
       properties: {
         path: { type: "string", description: "GameObject path" },
-        instanceId: { type: "number", description: "Instance ID (alternative)" },
+        instanceId: { type: "string", description: "Instance ID (alternative)" },
         action: { type: "string", description: "play, stop, pause, restart, or clear" },
       },
       required: ["action"],
@@ -3622,6 +3768,7 @@ export const editorTools = [
       properties: {
         type: { type: "string", description: "Full type name (e.g. 'GameSettings', 'MyNamespace.PlayerData')" },
         path: { type: "string", description: "Asset path (default: Assets/TypeName.asset)" },
+        overwrite: { type: "boolean", description: "Replace an existing asset at this path (default false: refuse, to avoid resetting tuned data)." },
       },
       required: ["type"],
     },
@@ -3647,7 +3794,7 @@ export const editorTools = [
       properties: {
         path: { type: "string", description: "Asset path of the ScriptableObject" },
         field: { type: "string", description: "Property/field name" },
-        value: { description: "Value to set (type depends on field)" },
+        value: { type: ["string", "number", "boolean", "object", "array", "null"], description: "Value to set (type depends on field)" },
       },
       required: ["path", "field", "value"],
     },
@@ -4025,7 +4172,7 @@ export const editorTools = [
       type: "object",
       properties: {
         key: { type: "string", description: "Preference key" },
-        value: { description: "Value to set" },
+        value: { type: ["string", "number", "boolean"], description: "Value to set" },
         type: { type: "string", description: "Value type: string, int, float, bool" },
       },
       required: ["key", "value"],
@@ -4064,7 +4211,7 @@ export const editorTools = [
       type: "object",
       properties: {
         key: { type: "string", description: "Preference key" },
-        value: { description: "Value to set" },
+        value: { type: ["string", "number"], description: "Value to set" },
         type: { type: "string", description: "Value type: string, int, float" },
       },
       required: ["key", "value"],
@@ -4169,21 +4316,119 @@ export const editorTools = [
   },
   {
     name: "unity_mppm_start",
-    description: "Start the currently active scenario.",
-    inputSchema: { type: "object", properties: {} },
-    handler: async () => formatResult(await bridge.sendCommand("scenario/start", {})),
+    description:
+      "Start the currently active scenario. By default also enters Play mode on the main editor " +
+      "so MPPM's Play-mode hooks fire (virtual players launch, scene tick starts). " +
+      "Set enterPlayMode=false to only mark the scenario running without entering Play.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        enterPlayMode: {
+          type: "boolean",
+          description: "Enter Play mode after starting the scenario. Default true.",
+        },
+      },
+    },
+    handler: async (args) =>
+      formatResult(await bridge.sendCommand("scenario/start", args || {})),
   },
   {
     name: "unity_mppm_stop",
-    description: "Stop the running scenario.",
-    inputSchema: { type: "object", properties: {} },
-    handler: async () => formatResult(await bridge.sendCommand("scenario/stop", {})),
+    description:
+      "Stop the running scenario. By default also exits Play mode on the main editor so " +
+      "virtual-player processes shut down. Set exitPlayMode=false to leave Play mode running.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        exitPlayMode: {
+          type: "boolean",
+          description: "Exit Play mode after stopping the scenario. Default true.",
+        },
+      },
+    },
+    handler: async (args) =>
+      formatResult(await bridge.sendCommand("scenario/stop", args || {})),
   },
   {
     name: "unity_mppm_info",
     description: "Get multiplayer play mode information including CurrentPlayer state, tags, and MPPM package version.",
     inputSchema: { type: "object", properties: {} },
     handler: async () => formatResult(await bridge.sendCommand("scenario/info", {})),
+  },
+  {
+    name: "unity_mppm_create_scenario",
+    description:
+      "Create an MPPM ScenarioConfig asset programmatically. Unity 6+ (MPPM 2.0). " +
+      "Produces 1 MainEditor instance + N VirtualEditor instances, saved as a .asset " +
+      "file you can then activate with unity_mppm_activate_scenario and run with unity_mppm_start.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Scenario name (also used as the default asset file name)." },
+        path: { type: "string", description: "Optional asset path. Defaults to 'Assets/MPPM/{name}.asset'." },
+        mainRole: {
+          type: "string",
+          enum: ["Host", "Client", "Server"],
+          description: "Role for the Main Editor instance. 'Host' = ClientAndServer (default).",
+        },
+        virtualEditors: {
+          type: "integer",
+          minimum: 0,
+          description: "Number of Virtual Editor instances (clones) to add. Default 1.",
+        },
+        virtualRole: {
+          type: "string",
+          enum: ["Client", "Server", "Host"],
+          description: "Role for each Virtual Editor instance. Default 'Client'.",
+        },
+        description: { type: "string", description: "Optional human-readable description." },
+      },
+      required: ["name"],
+    },
+    handler: async (args) =>
+      formatResult(await bridge.sendCommand("scenario/create", args || {})),
+  },
+
+  // ─── MPPM Virtual Players (direct lifecycle, no scenario asset needed) ───
+  {
+    name: "unity_mppm_list_players",
+    description:
+      "List the 4 MPPM virtual-player slots and their current state " +
+      "(NotLaunched / Launching / Launched / Communicative). Use this before " +
+      "activating a player to verify slot availability.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => formatResult(await bridge.sendCommand("mppm/list-players", {})),
+  },
+  {
+    name: "unity_mppm_activate_player",
+    description:
+      "Activate a Virtual Player (clone Unity Editor process). index must be 2, 3, or 4 " +
+      "(Player 1 is the main editor). Returns immediately while the player is in 'Launching' " +
+      "state — poll unity_mppm_list_players or unity_list_instances to detect when ready " +
+      "(typically 30-60s on a cold project). Refuses to activate if there are pending compile " +
+      "errors (returns ActivationError=CompileErrors).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        index: { type: "integer", description: "Player slot to activate: 2, 3, or 4.", minimum: 2, maximum: 4 },
+      },
+      required: ["index"],
+    },
+    handler: async ({ index }) => formatResult(await bridge.sendCommand("mppm/activate-player", { index })),
+  },
+  {
+    name: "unity_mppm_deactivate_player",
+    description:
+      "Deactivate a Virtual Player previously activated via unity_mppm_activate_player. " +
+      "index must be 2, 3, or 4.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        index: { type: "integer", description: "Player slot to deactivate: 2, 3, or 4.", minimum: 2, maximum: 4 },
+      },
+      required: ["index"],
+    },
+    handler: async ({ index }) => formatResult(await bridge.sendCommand("mppm/deactivate-player", { index })),
   },
 
   // ─── Testing ───
@@ -4218,7 +4463,11 @@ export const editorTools = [
         groupNames: {
           type: "array",
           items: { type: "string" },
-          description: "Run only tests in these groups",
+          description: "Regex patterns matched against the test fixture's FullName (Unity's Filter.groupNames). Class name like 'MountSmokeTests' runs every method on that class.",
+        },
+        filter: {
+          type: "string",
+          description: "Convenience alias forwarded into Unity's Filter.groupNames as a regex. Pass a class name (e.g. 'MountSmokeTests') or a regex; comma-separated values are split into multiple groupNames entries. Merges with any explicit groupNames array.",
         },
         clearStuck: {
           type: "boolean",
@@ -4228,13 +4477,13 @@ export const editorTools = [
     },
     handler: async (params) => {
       const result = await bridge.runTests(params);
-      // If the run started successfully, auto-poll for a few seconds to provide early feedback
-      if (result.jobId && result.status === "running") {
-        // Wait briefly then check for early results
+      // Bridge wraps handler payloads as { success, data:{...} }, so the jobId/status
+      // live under .data. Reading the top level made this early-feedback branch dead.
+      const started = result.data ?? result;
+      if (started.jobId && started.status === "running") {
         await new Promise((r) => setTimeout(r, 2000));
         try {
-          const status = await bridge.getTestJob({ jobId: result.jobId });
-          return formatResult(status);
+          return formatResult(await bridge.getTestJob({ jobId: started.jobId }));
         } catch (_) {
           return formatResult(result);
         }
@@ -4274,16 +4523,18 @@ export const editorTools = [
     handler: async (params) => {
       const waitTimeout = params?.waitTimeout;
       if (waitTimeout && waitTimeout > 0) {
-        // Server-side polling loop
+        // Server-side polling loop. Terminal status lives under .data (bridge envelope);
+        // reading the top level meant this never short-circuited and always burned the
+        // full timeout even when the run finished in seconds.
+        const TERMINAL = new Set(["succeeded", "failed", "error", "cancelled", "canceled", "completed", "timedout"]);
         const deadline = Date.now() + waitTimeout * 1000;
         let lastResult;
         while (Date.now() < deadline) {
           lastResult = await bridge.getTestJob(params);
-          const status = lastResult?.status;
-          if (status === "succeeded" || status === "failed") {
+          const status = (lastResult?.data?.status ?? lastResult?.status ?? "").toLowerCase();
+          if (TERMINAL.has(status)) {
             return formatResult(lastResult);
           }
-          // Wait 2 seconds before next poll
           await new Promise((r) => setTimeout(r, 2000));
         }
         // Timeout — return last known state

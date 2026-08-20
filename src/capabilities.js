@@ -36,6 +36,9 @@ export const FEATURE_MIN_PROTOCOL = {
   // component/batch-wire — the first negotiated flag. Degrades to N single
   // component/set-reference calls when the plugin predates it.
   batchWire: 1,
+  // Handshake baseline: ping advertises versions and unknown routes return HTTP
+  // 404 on the legacy path. Upstream's key name, kept so either spelling resolves.
+  UNKNOWN_ROUTE_404: 1,
 };
 
 /**
@@ -86,7 +89,9 @@ export function resetWarnings() {
  * was never captured (e.g. a registry-sourced instance) or is misreported.
  */
 export function isRouteUnsupportedError(result) {
-  const RE = /unknown api endpoint|http 404\b|\b404 not found\b/i;
+  // "unknown route" comes from upstream's wording of the same plugin signal; both
+  // spellings are live in the tree, so the predicate matches either.
+  const RE = /unknown api endpoint|unknown route|http 404\b|\b404 not found\b/i;
   if (result == null) return false;
   if (typeof result === "string") return RE.test(result);
   if (typeof result === "object") {
@@ -146,3 +151,17 @@ async function degradeBatchWire(bridge, params) {
     results,
   };
 }
+
+// --- Upstream-name aliases -------------------------------------------------
+// origin/main independently re-implemented this module (its header credits
+// community PR #32, D3vCrow) and settled on different names for the same two
+// exports. Both spellings are imported live in this tree: tool-tiers.js and
+// tools/editor-tools.js pull isUnknownRouteResult, while the local files and
+// capabilities.test.js pull isRouteUnsupportedError. Aliasing keeps both sets of
+// callers working off one implementation instead of two that can drift apart.
+
+/** @deprecated Upstream spelling of FEATURE_MIN_PROTOCOL. */
+export const PLUGIN_FEATURES = FEATURE_MIN_PROTOCOL;
+
+/** @deprecated Upstream spelling of isRouteUnsupportedError. */
+export const isUnknownRouteResult = isRouteUnsupportedError;

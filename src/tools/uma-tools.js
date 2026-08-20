@@ -2,8 +2,8 @@
 // These tools are only functional when UMA is installed in the Unity project.
 // The C# side is wrapped in #if UMA_INSTALLED - calls will return an error if UMA is absent.
 import * as bridge from "../uma-bridge.js";
-
 import { formatResult } from "../response-format.js";
+
 
 export const umaTools = [
   {
