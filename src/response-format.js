@@ -83,8 +83,7 @@ export function isErrorResult(result) {
 //
 // Borrowed from Felsyn/felhaven's `{"error": "slug: detail"}` convention
 // (CONVENTIONS.md §2), which caught a real API key leaking into its own logs
-// through a request exception's URL. See
-// F:/DevCrow/Dev/knowledge/research/2026-08-10-vet-felhaven.md.
+// through a request exception's URL.
 
 import os from "node:os";
 

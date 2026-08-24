@@ -12,7 +12,7 @@
 //
 // Pattern borrowed from Felsyn/felhaven's `{"error": "slug: detail"}` convention,
 // which caught a real API key leaking into its own logs through a request
-// exception's URL. Vet: F:/DevCrow/Dev/knowledge/research/2026-08-10-vet-felhaven.md
+// exception's URL.
 //
 // KNOWN LIMIT — this scan is weaker than felhaven's original. Theirs parses the
 // module's own AST, so it can tell `str(e)` from a literal that merely looks like
