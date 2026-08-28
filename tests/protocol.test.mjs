@@ -115,7 +115,11 @@ describe("queue-mode session (single instance)", () => {
 
   test("tools/list exposes the two-tier surface with unique names and valid shapes", async () => {
     const { tools } = await client.listTools();
-    assert.ok(tools.length >= 70 && tools.length <= 90, `expected ~79 exposed tools, got ${tools.length}`);
+    // 54 exposed = 2 instance + 6 hub + 43 core + 2 meta + 1 context. Upstream sits at ~79;
+    // this fork trims the core tier (src/tool-tiers.js), so the window brackets 54. The
+    // ceiling is the issue-#27 guard (oversized registries break MCP clients); the floor
+    // catches an accidental surface collapse, e.g. a tier split that silently drops tools.
+    assert.ok(tools.length >= 45 && tools.length <= 70, `expected ~54 exposed tools, got ${tools.length}`);
     const names = new Set();
     for (const tool of tools) {
       assert.ok(/^unity_[a-z0-9_]+$/.test(tool.name), `tool name convention: ${tool.name}`);
@@ -416,12 +420,18 @@ describe("queue-mode session (single instance)", () => {
     assert.ok(full.payload.data.entries[0].stackTrace.includes("Frame11"), "explicit 'all' restores full traces");
   });
 
+  // unity_component_batch_wire sits in the ADVANCED tier in this fork (the core trim moved
+  // it out), so it is reached through the dispatcher rather than as a top-level tool. The
+  // dispatcher runs the tool's own handler, so this still exercises the real degrade path.
   test("batch-wire degrades to single set-reference calls on plugins without the route", async () => {
-    const { payload, isError } = await client.callTool("unity_component_batch_wire", {
-      references: [
-        { path: "Manager", componentType: "Hud", propertyName: "panelA", referenceGameObject: "PanelA" },
-        { path: "Manager", componentType: "Hud", propertyName: "panelB", referenceGameObject: "PanelB" },
-      ],
+    const { payload, isError } = await client.callTool("unity_advanced_tool", {
+      tool: "unity_component_batch_wire",
+      params: {
+        references: [
+          { path: "Manager", componentType: "Hud", propertyName: "panelA", referenceGameObject: "PanelA" },
+          { path: "Manager", componentType: "Hud", propertyName: "panelB", referenceGameObject: "PanelB" },
+        ],
+      },
     });
     assert.equal(payload.success, true);
     assert.match(payload.degraded, /batch-wire unavailable/);
@@ -448,11 +458,14 @@ describe("queue-mode session (single instance)", () => {
   });
 
   test("degraded batch-wire reports failure when an entry fails via the legacy error envelope", async () => {
-    const { payload, isError } = await client.callTool("unity_component_batch_wire", {
-      references: [
-        { path: "Manager", componentType: "Hud", propertyName: "propOk", referenceGameObject: "X" },
-        { path: "Manager", componentType: "Hud", propertyName: "propBad", referenceGameObject: "Y" },
-      ],
+    const { payload, isError } = await client.callTool("unity_advanced_tool", {
+      tool: "unity_component_batch_wire",
+      params: {
+        references: [
+          { path: "Manager", componentType: "Hud", propertyName: "propOk", referenceGameObject: "X" },
+          { path: "Manager", componentType: "Hud", propertyName: "propBad", referenceGameObject: "Y" },
+        ],
+      },
     });
     assert.equal(payload.success, false, "a failed degraded entry must not report overall success");
     assert.equal(payload.failedCount, 1);
@@ -528,9 +541,11 @@ describe("compact tool registry mode (UNITY_MCP_COMPACT_TOOLS=1)", () => {
     await bridge.stop();
   });
 
-  test("keeps all 79 tools but fits constrained-client budgets (issue #27)", async () => {
+  test("keeps the whole exposed surface but fits constrained-client budgets (issue #27)", async () => {
     const { tools } = await client.listTools();
-    assert.ok(tools.length >= 70 && tools.length <= 90, `all tools still exposed (${tools.length})`);
+    // Compact mode shrinks each schema, never the tool count — same 54-tool window as
+    // rich mode above.
+    assert.ok(tools.length >= 45 && tools.length <= 70, `all tools still exposed (${tools.length})`);
     const bytes = Buffer.byteLength(JSON.stringify(tools), "utf8");
     console.error(`[gate] compact tools/list payload: ${(bytes / 1024).toFixed(1)} KB`);
     assert.ok(bytes <= 24_000, `compact tools/list ${bytes} bytes exceeds 24KB`);

@@ -21,6 +21,8 @@
 //
 // Ref: knowledge/research/2026-07-12-vet-unity-ml-agents.md
 
+import { looksLikeErrorObject } from "./response-format.js";
+
 /**
  * Wire-protocol version this server speaks. Bump when the server starts REQUIRING a
  * plugin-side behavior that older plugins can't provide. Keep in sync with the
@@ -52,7 +54,11 @@ export const FEATURE_MIN_PROTOCOL = {
  */
 export function pluginSupports(instance, feature) {
   const need = FEATURE_MIN_PROTOCOL[feature] ?? Infinity;
-  const have = instance?.protocolVersion ?? 0;
+  // Only a real int counts as an advertised version. A plugin that sends
+  // `"protocolVersion": "1"` as a JSON string would otherwise pass `>=` through
+  // type coercion — the gate is documented as a monotonic int, so anything else
+  // is treated as "never advertised" and degrades (fail-safe).
+  const have = typeof instance?.protocolVersion === "number" ? instance.protocolVersion : 0;
   return have >= need;
 }
 
@@ -132,22 +138,27 @@ export async function callBatchWireWithFallback(bridge, instance, params) {
 
 /**
  * Emulate component/batch-wire with one component/set-reference call per entry.
- * @returns {object} aggregate result flagged `degraded:true`.
+ * @returns {object} aggregate result carrying the `degraded` marker, an honest
+ *   `success` flag, and `failedCount`.
  */
 async function degradeBatchWire(bridge, params) {
   const refs = Array.isArray(params?.references) ? params.references : [];
-  const results = [];
-  let failed = 0;
-  for (const entry of refs) {
-    const r = await bridge.setComponentReference(entry);
-    if (isRouteUnsupportedError(r) || (r && r.error) || (r && r.success === false)) failed++;
-    results.push(r);
-  }
+  // Pipeline the round-trips instead of awaiting each in turn — the plugin queue still
+  // serializes the actual writes, but this bounds wall-clock by the slowest single call
+  // rather than their sum (the batch tool's whole point is many refs at once). Promise.all
+  // preserves order, so results[i] still matches references[i].
+  const results = await Promise.all(refs.map((entry) => bridge.setComponentReference(entry)));
+  // Old plugins report per-call failures as an HTTP 200 { success:true, data:{error} }
+  // envelope, so a plain success!==false check would mask every degraded failure — the
+  // exact misleading-success class this project set out to kill. Inspect the inner
+  // payload too, and report `success` so the isError seam can fire on it.
+  const isOk = (r) => Boolean(r) && !looksLikeErrorObject(r) && !isRouteUnsupportedError(r);
+  const failedCount = results.filter((r) => !isOk(r)).length;
   return {
-    degraded: true,
-    mode: "batch-wire→set-reference (plugin lacks component/batch-wire)",
+    success: failedCount === 0,
+    degraded: "batch-wire unavailable on this plugin version; executed as single set-reference calls",
     total: refs.length,
-    failed,
+    failedCount,
     results,
   };
 }
