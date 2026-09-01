@@ -1,7 +1,7 @@
 // Unity MCP — Multi-Instance Discovery
 // Discovers running Unity Editor instances via:
 //   1. Shared registry file (%LOCALAPPDATA%/UnityMCP/instances.json)
-//   2. Port scanning fallback (7890-7899)
+//   2. Port scanning fallback (7700-7709)
 //
 // Also manages instance selection state for the current MCP session.
 

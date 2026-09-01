@@ -5,7 +5,7 @@
       "args": ["C:/PATH_TO/unity-mcp-server/src/index.js"],
       "env": {
         "UNITY_HUB_PATH": "C:\\Program Files\\Unity Hub\\Unity Hub.exe",
-        "UNITY_BRIDGE_PORT": "7890"
+        "UNITY_BRIDGE_PORT": "7700"
       }
     }
   }
