@@ -20,7 +20,7 @@ export const CONFIG = {
 
   // Unity Editor Bridge (default — used as fallback when no instance is selected)
   editorBridgeHost: process.env.UNITY_BRIDGE_HOST || "127.0.0.1",
-  editorBridgePort: parseInt(process.env.UNITY_BRIDGE_PORT || "7890"),
+  editorBridgePort: parseInt(process.env.UNITY_BRIDGE_PORT || "7700"),
   editorBridgeTimeout: parseInt(process.env.UNITY_BRIDGE_TIMEOUT || "60000"),
 
   // Queue SUBMIT just enqueues a ticket and returns immediately; the long-running work is
@@ -28,9 +28,14 @@ export const CONFIG = {
   // stalled or unreachable bridge fails in seconds instead of the full 60s editorBridgeTimeout.
   submitTimeoutMs: parseInt(process.env.UNITY_SUBMIT_TIMEOUT || "8000"),
 
-  // Multi-instance support
-  portRangeStart: parseInt(process.env.UNITY_PORT_RANGE_START || "7890"),
-  portRangeEnd: parseInt(process.env.UNITY_PORT_RANGE_END || "7899"),
+  // Multi-instance support.
+  //
+  // Kept clear of 7800-7999, which Unity's com.unity.pipeline package claims
+  // wholesale (editor 7800-7849, editor tests 7850-7899, runtime 7900-7949,
+  // runtime tests 7950-7999). Must stay in lockstep with the plugin's
+  // MCPInstanceRegistry.PortRangeStart/End.
+  portRangeStart: parseInt(process.env.UNITY_PORT_RANGE_START || "7700"),
+  portRangeEnd: parseInt(process.env.UNITY_PORT_RANGE_END || "7709"),
   instanceRegistryPath: process.env.UNITY_INSTANCE_REGISTRY || getRegistryPath(),
 
   // Queue mode polling (for async ticket-based requests)

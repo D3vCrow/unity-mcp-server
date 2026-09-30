@@ -62,9 +62,13 @@ test("degrade (proactive): KNOWN-old peer (protocolVersion 0) → N set-referenc
 
   assert.equal(batchCalls, 0, "must not call batch-wire on a known-unsupported peer");
   assert.equal(setRefCalls, 3, "one set-reference per entry");
-  assert.equal(out.degraded, true);
+  // `degraded` carries the reason as text and the aggregate reports an honest `success`,
+  // so a degraded batch with a failed entry still trips the MCP isError seam
+  // (tests/protocol.test.mjs pins that contract end to end).
+  assert.match(out.degraded, /batch-wire unavailable/);
+  assert.equal(out.success, true);
   assert.equal(out.total, 3);
-  assert.equal(out.failed, 0);
+  assert.equal(out.failedCount, 0);
 });
 
 test("degrade (reactive): peer CLAIMS support but route missing → tries once, falls back, no throw", async () => {
@@ -81,7 +85,7 @@ test("degrade (reactive): peer CLAIMS support but route missing → tries once, 
 
   assert.equal(batchCalls, 1, "reactive path tries the fast route once");
   assert.equal(setRefCalls, 2);
-  assert.equal(out.degraded, true);
+  assert.match(out.degraded, /batch-wire unavailable/);
 });
 
 test("unknown peer (no protocolVersion): tries fast path; keeps it when the route works", async () => {

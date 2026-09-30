@@ -1,7 +1,6 @@
 ﻿// AnkleBreaker Unity MCP â€” Tool definitions for Unity Editor operations (via HTTP bridge)
 import * as bridge from "../unity-editor-bridge.js";
-import { formatResult, looksLikeErrorObject } from "../response-format.js";
-import { isUnknownRouteResult } from "../capabilities.js";
+import { formatResult } from "../response-format.js";
 
 // Shared shaping for image-returning graphics tools.
 // The bridge wraps plugin payloads as { success, data: { ..., base64 } } (queue mode)

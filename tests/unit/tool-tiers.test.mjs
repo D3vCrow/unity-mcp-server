@@ -13,8 +13,11 @@ describe("splitToolTiers on the real tool set", () => {
   const split = splitToolTiers([...editorTools, ...umaTools, ...probuilderTools]);
 
   test("tier counts are pinned (update deliberately when the surface changes)", () => {
-    assert.equal(split.coreCount, 69, "core tier count");
-    assert.equal(split.advancedCount, 269, "advanced tier count");
+    // 43/295, not upstream's 69/269: this fork trims the core tier on purpose
+    // (see the CORE_TOOLS header in src/tool-tiers.js). Everything moved out stays
+    // reachable through unity_advanced_tool, so the total below is the real invariant.
+    assert.equal(split.coreCount, 43, "core tier count");
+    assert.equal(split.advancedCount, 295, "advanced tier count");
     assert.equal(
       split.coreCount + split.advancedCount,
       editorTools.length + umaTools.length + probuilderTools.length
@@ -35,12 +38,30 @@ describe("splitToolTiers on the real tool set", () => {
   test("core tier keeps the daily-driver tools", () => {
     const coreNames = new Set(split.coreTools.map((t) => t.name));
     for (const name of [
-      "unity_editor_state", "unity_scene_hierarchy", "unity_gameobject_create",
+      "unity_editor_state", "unity_scene_hierarchy", "unity_gameobject_info",
       "unity_component_set_property", "unity_execute_code", "unity_console_log",
-      "unity_get_compilation_errors", "unity_play_mode", "unity_search_assets",
-      "unity_undo_last",
+      "unity_play_mode", "unity_search_assets", "unity_undo_last",
     ]) {
       assert.ok(coreNames.has(name), `${name} stays core`);
+    }
+  });
+
+  // The fork's trim dropped these two from the direct surface (they were core upstream).
+  // That is a routing decision, not a capability cut — the trim's whole promise is "no
+  // loss of functionality, just fewer tools per handshake", so assert they are still
+  // dispatchable through the advanced tier rather than dropping the coverage.
+  test("tools trimmed out of core are still reachable via the advanced tier", () => {
+    const coreNames = new Set(split.coreTools.map((t) => t.name));
+    // The dispatcher's advanced map is exactly "every tool that isn't core", so a name
+    // in this set is callable as unity_advanced_tool({ tool: name }).
+    const advancedNames = new Set(
+      [...editorTools, ...umaTools, ...probuilderTools]
+        .map((t) => t.name)
+        .filter((n) => !coreNames.has(n))
+    );
+    for (const name of ["unity_gameobject_create", "unity_get_compilation_errors"]) {
+      assert.ok(!coreNames.has(name), `${name} is trimmed out of core`);
+      assert.ok(advancedNames.has(name), `${name} stays callable via unity_advanced_tool`);
     }
   });
 

@@ -92,8 +92,10 @@ function nearestToolNames(name, knownNames, limit = 3) {
 }
 
 // ─── Core tool names (always exposed individually) ───
-// Personal trim: 17 tools covering ~91% of a 15-session / 944-call audit
-// (Thrion Arena Multiplayer Update, 2026-03 → 2026-04).
+// Personal trim (fork-only, not an upstream PR): started at the 17 tools covering ~91%
+// of a 15-session / 944-call audit (Thrion Arena Multiplayer Update, 2026-03 → 2026-04),
+// then grew back to 43 as later merges restored the capture, package, undo and search
+// families. Upstream's core tier is 69.
 // All other tools remain reachable via unity_advanced_tool (with lazy route fallback).
 const CORE_TOOLS = new Set([
   // Connection & state
@@ -135,7 +137,6 @@ const CORE_TOOLS = new Set([
   "unity_search_by_tag",
   "unity_search_by_layer",
   "unity_search_by_name",
-  "unity_search_by_component",
   "unity_search_assets",
   "unity_search_missing_references",
 
