@@ -41,7 +41,16 @@ describe("isUnknownRouteResult", () => {
     assert.equal(isUnknownRouteResult({ success: false, error: "NullReferenceException at ..." }), false);
     assert.equal(isUnknownRouteResult({ success: false, error: "Timeout after 30s" }), false);
     assert.equal(isUnknownRouteResult(null), false);
-    assert.equal(isUnknownRouteResult("Unknown route"), false);
+    assert.equal(isUnknownRouteResult("some unrelated failure"), false);
+  });
+
+  // The surviving implementation is the local `isRouteUnsupportedError` (this name is its
+  // alias — see the alias block in src/capabilities.js). It accepts a bare error STRING as
+  // well as a result object, which the upstream copy did not; the string form is the
+  // reactive net for paths that never captured a `protocolVersion`.
+  test("bare error strings are matched too (local implementation's wider contract)", () => {
+    assert.equal(isUnknownRouteResult("HTTP 404 Not Found"), true);
+    assert.equal(isUnknownRouteResult("Unknown API endpoint: x/y"), true);
   });
 });
 

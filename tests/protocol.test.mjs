@@ -115,7 +115,11 @@ describe("queue-mode session (single instance)", () => {
 
   test("tools/list exposes the two-tier surface with unique names and valid shapes", async () => {
     const { tools } = await client.listTools();
-    assert.ok(tools.length >= 70 && tools.length <= 90, `expected ~79 exposed tools, got ${tools.length}`);
+    // 54 exposed = 2 instance + 6 hub + 43 core + 2 meta + 1 context. Upstream sits at ~79;
+    // this fork trims the core tier (src/tool-tiers.js), so the window brackets 54. The
+    // ceiling is the issue-#27 guard (oversized registries break MCP clients); the floor
+    // catches an accidental surface collapse, e.g. a tier split that silently drops tools.
+    assert.ok(tools.length >= 45 && tools.length <= 70, `expected ~54 exposed tools, got ${tools.length}`);
     const names = new Set();
     for (const tool of tools) {
       assert.ok(/^unity_[a-z0-9_]+$/.test(tool.name), `tool name convention: ${tool.name}`);
@@ -139,6 +143,16 @@ describe("queue-mode session (single instance)", () => {
     assert.ok(editorState.inputSchema.properties.port, "unity_editor_state has injected port param");
     const skip = tools.filter((t) => t.name.startsWith("unity_hub_") || t.name === "unity_select_instance" || t.name === "unity_list_instances");
     assert.ok(skip.length >= 3, "skip-set tools present");
+  });
+
+  test("destructive tools carry destructiveHint; nothing claims read-only", async () => {
+    const { tools } = await client.listTools();
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+    for (const name of ["unity_advanced_tool", "unity_execute_code", "unity_execute_menu_item", "unity_packages_remove", "unity_scene_save"]) {
+      assert.equal(byName[name]?.annotations?.destructiveHint, true, `${name} is marked destructive`);
+    }
+    assert.equal(byName.unity_editor_state.annotations, undefined, "non-destructive tools stay unlabeled");
+    assert.ok(tools.every((t) => t.annotations?.readOnlyHint !== true), "no tool self-declares read-only");
   });
 
   test("tools/list payload size is recorded (budget gate)", async () => {
@@ -223,6 +237,27 @@ describe("queue-mode session (single instance)", () => {
     assert.equal(call.payload.success, true);
     const seen = bridge.seen.find((r) => r.route === "experimental/new-thing");
     assert.ok(seen, "derived route reached the bridge");
+  });
+
+  test("destructive proxy calls need a server-minted confirm_token before reaching Unity", async () => {
+    const reached = () => bridge.seen.filter((r) => r.route === "gameobject/delete").length;
+    const args = { tool: "unity_gameobject_delete", params: { path: "Enemy" } };
+
+    const preview = await client.callTool("unity_advanced_tool", args);
+    assert.equal(preview.payload.confirmation_required, true);
+    assert.equal(reached(), 0, "preview does not touch Unity");
+
+    const forged = await client.callTool("unity_advanced_tool", { ...args, confirm_token: "made-up" });
+    assert.equal(forged.payload.error, "confirm_token_rejected");
+    assert.equal(reached(), 0, "an invented token does not run the tool");
+
+    const token = preview.payload.confirm_token;
+    await client.callTool("unity_advanced_tool", { ...args, confirm_token: token });
+    assert.equal(reached(), 1, "the minted token runs it once");
+
+    const replay = await client.callTool("unity_advanced_tool", { ...args, confirm_token: token });
+    assert.equal(replay.payload.error, "confirm_token_rejected");
+    assert.equal(reached(), 1, "a used token cannot run it again");
   });
 
   test("unity_advanced_tool proxies CORE tools via route overrides (stale-schema escape hatch)", async () => {
@@ -416,12 +451,18 @@ describe("queue-mode session (single instance)", () => {
     assert.ok(full.payload.data.entries[0].stackTrace.includes("Frame11"), "explicit 'all' restores full traces");
   });
 
+  // unity_component_batch_wire sits in the ADVANCED tier in this fork (the core trim moved
+  // it out), so it is reached through the dispatcher rather than as a top-level tool. The
+  // dispatcher runs the tool's own handler, so this still exercises the real degrade path.
   test("batch-wire degrades to single set-reference calls on plugins without the route", async () => {
-    const { payload, isError } = await client.callTool("unity_component_batch_wire", {
-      references: [
-        { path: "Manager", componentType: "Hud", propertyName: "panelA", referenceGameObject: "PanelA" },
-        { path: "Manager", componentType: "Hud", propertyName: "panelB", referenceGameObject: "PanelB" },
-      ],
+    const { payload, isError } = await client.callTool("unity_advanced_tool", {
+      tool: "unity_component_batch_wire",
+      params: {
+        references: [
+          { path: "Manager", componentType: "Hud", propertyName: "panelA", referenceGameObject: "PanelA" },
+          { path: "Manager", componentType: "Hud", propertyName: "panelB", referenceGameObject: "PanelB" },
+        ],
+      },
     });
     assert.equal(payload.success, true);
     assert.match(payload.degraded, /batch-wire unavailable/);
@@ -448,11 +489,14 @@ describe("queue-mode session (single instance)", () => {
   });
 
   test("degraded batch-wire reports failure when an entry fails via the legacy error envelope", async () => {
-    const { payload, isError } = await client.callTool("unity_component_batch_wire", {
-      references: [
-        { path: "Manager", componentType: "Hud", propertyName: "propOk", referenceGameObject: "X" },
-        { path: "Manager", componentType: "Hud", propertyName: "propBad", referenceGameObject: "Y" },
-      ],
+    const { payload, isError } = await client.callTool("unity_advanced_tool", {
+      tool: "unity_component_batch_wire",
+      params: {
+        references: [
+          { path: "Manager", componentType: "Hud", propertyName: "propOk", referenceGameObject: "X" },
+          { path: "Manager", componentType: "Hud", propertyName: "propBad", referenceGameObject: "Y" },
+        ],
+      },
     });
     assert.equal(payload.success, false, "a failed degraded entry must not report overall success");
     assert.equal(payload.failedCount, 1);
@@ -528,9 +572,11 @@ describe("compact tool registry mode (UNITY_MCP_COMPACT_TOOLS=1)", () => {
     await bridge.stop();
   });
 
-  test("keeps all 79 tools but fits constrained-client budgets (issue #27)", async () => {
+  test("keeps the whole exposed surface but fits constrained-client budgets (issue #27)", async () => {
     const { tools } = await client.listTools();
-    assert.ok(tools.length >= 70 && tools.length <= 90, `all tools still exposed (${tools.length})`);
+    // Compact mode shrinks each schema, never the tool count — same 54-tool window as
+    // rich mode above.
+    assert.ok(tools.length >= 45 && tools.length <= 70, `all tools still exposed (${tools.length})`);
     const bytes = Buffer.byteLength(JSON.stringify(tools), "utf8");
     console.error(`[gate] compact tools/list payload: ${(bytes / 1024).toFixed(1)} KB`);
     assert.ok(bytes <= 24_000, `compact tools/list ${bytes} bytes exceeds 24KB`);

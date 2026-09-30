@@ -14,6 +14,7 @@
 // This means new tools added to the C# plugin work immediately without
 // restarting the MCP server.
 
+import { randomBytes, createHash } from "crypto";
 import { sendCommand } from "./unity-editor-bridge.js";
 import { formatResult, firstSentence, toolErrorText } from "./response-format.js";
 import { isUnknownRouteResult } from "./capabilities.js";
@@ -91,8 +92,10 @@ function nearestToolNames(name, knownNames, limit = 3) {
 }
 
 // ─── Core tool names (always exposed individually) ───
-// Personal trim: 17 tools covering ~91% of a 15-session / 944-call audit
-// (Thrion Arena Multiplayer Update, 2026-03 → 2026-04).
+// Personal trim (fork-only, not an upstream PR): started at the 17 tools covering ~91%
+// of a 15-session / 944-call audit (Thrion Arena Multiplayer Update, 2026-03 → 2026-04),
+// then grew back to 43 as later merges restored the capture, package, undo and search
+// families. Upstream's core tier is 69.
 // All other tools remain reachable via unity_advanced_tool (with lazy route fallback).
 const CORE_TOOLS = new Set([
   // Connection & state
@@ -134,7 +137,6 @@ const CORE_TOOLS = new Set([
   "unity_search_by_tag",
   "unity_search_by_layer",
   "unity_search_by_name",
-  "unity_search_by_component",
   "unity_search_assets",
   "unity_search_missing_references",
 
@@ -192,6 +194,82 @@ function suggestSimilarTools(input, candidates) {
   }
   scored.sort((a, b) => a.distance - b.distance);
   return scored.slice(0, 3).map((s) => s.name);
+}
+
+/**
+ * Exposed tools that can destroy or overwrite work. unity_advanced_tool is here because it
+ * proxies every advanced tool, deletes included — a per-tool label never reaches the client
+ * through it. execute_code / execute_menu_item run arbitrary actions.
+ */
+const DESTRUCTIVE_TOOLS = new Set([
+  "unity_advanced_tool",
+  "unity_execute_code",
+  "unity_execute_menu_item",
+  "unity_scene_save",
+]);
+const DESTRUCTIVE_NAME = /_(delete|remove|destroy|clear|reset|uninstall)(_|$)/;
+
+/**
+ * MCP tool annotations for an exposed tool, or undefined. Only ever tightens: marks a tool
+ * destructive so the client can ask before running it. Never sets readOnlyHint: true — a
+ * wrong read-only label would let a client skip a confirm the tool needed.
+ */
+export function toolAnnotations(name) {
+  if (DESTRUCTIVE_TOOLS.has(name) || DESTRUCTIVE_NAME.test(name)) {
+    return { readOnlyHint: false, destructiveHint: true };
+  }
+  return undefined;
+}
+
+// ─── Server-side confirm for destructive proxy calls ───
+// destructiveHint is a label a client may ignore, so the proxy enforces its own gate: a
+// destructive-named tool first returns a preview plus a one-time token bound to the exact
+// tool + params, and only a second call presenting that token runs it. The token is minted
+// here, never accepted from anywhere else, and dies on use or after CONFIRM_TTL_MS.
+const CONFIRM_TTL_MS = 5 * 60 * 1000;
+const pendingConfirms = new Map(); // token -> { tool, digest, expires }
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function callDigest(tool, params) {
+  return createHash("sha256").update(`${tool}\n${canonicalJson(params)}`).digest("hex");
+}
+
+/** Returns null when the call may run, or the preview/refusal text to send back instead. */
+export function checkDestructiveConfirm(tool, params, confirmToken, now = Date.now()) {
+  if (!DESTRUCTIVE_NAME.test(tool)) return null;
+  for (const [t, p] of pendingConfirms) if (p.expires <= now) pendingConfirms.delete(t);
+
+  const digest = callDigest(tool, params);
+  if (confirmToken !== undefined) {
+    const pending = pendingConfirms.get(confirmToken);
+    pendingConfirms.delete(confirmToken);
+    if (pending && pending.tool === tool && pending.digest === digest) return null;
+    return JSON.stringify({
+      error: "confirm_token_rejected",
+      message:
+        "The confirm_token is unknown, expired, already used, or was issued for a different tool or different params. " +
+        "Call again without confirm_token to get a fresh preview.",
+    });
+  }
+
+  const token = randomBytes(12).toString("hex");
+  pendingConfirms.set(token, { tool, digest, expires: now + CONFIRM_TTL_MS });
+  return JSON.stringify({
+    confirmation_required: true,
+    tool,
+    params,
+    message:
+      `${tool} is destructive and was NOT run. Show this to the user and ask before continuing. ` +
+      "To run it, call unity_advanced_tool again with the same tool and params plus this confirm_token (single use, 5 minutes).",
+    confirm_token: token,
+  });
 }
 
 /**
@@ -459,13 +537,21 @@ export function splitToolTiers(allEditorTools) {
             "Parameters to pass to the tool. Call unity_list_advanced_tools with the tool's category to see its inputSchema (required params + allowed values).",
           additionalProperties: true,
         },
+        confirm_token: {
+          type: "string",
+          description:
+            "Only for destructive tools (delete/remove/clear/reset...): the token a previous call returned in its preview. Never invent one.",
+        },
       },
       required: ["tool"],
     },
-    handler: async ({ tool, params } = {}) => {
+    handler: async ({ tool, params, confirm_token } = {}) => {
       if (!tool) {
         return "Error: 'tool' parameter is required. Use unity_list_advanced_tools to see available tools.";
       }
+
+      const confirmGate = checkDestructiveConfirm(tool, params || {}, confirm_token);
+      if (confirmGate) return confirmGate;
 
       const targetTool = advancedMap.get(tool);
       if (targetTool) {

@@ -150,7 +150,7 @@ Open Claude Desktop > Settings > Developer > Edit Config, and add:
       "args": ["C:/path/to/unity-mcp-server/src/index.js"],
       "env": {
         "UNITY_HUB_PATH": "C:\\Program Files\\Unity Hub\\Unity Hub.exe",
-        "UNITY_BRIDGE_PORT": "7890"
+        "UNITY_BRIDGE_PORT": "7700"
       }
     }
   }
@@ -177,10 +177,10 @@ Restart Claude Desktop. Done!
 |---------------------|---------|-------------|
 | `UNITY_HUB_PATH` | `C:\Program Files\Unity Hub\Unity Hub.exe` | Unity Hub executable path |
 | `UNITY_BRIDGE_HOST` | `127.0.0.1` | Editor bridge host |
-| `UNITY_BRIDGE_PORT` | `7890` | Editor bridge port (auto-discovered when using multi-instance) |
+| `UNITY_BRIDGE_PORT` | `7700` | Editor bridge port (auto-discovered when using multi-instance) |
 | `UNITY_BRIDGE_TIMEOUT` | `60000` | Request timeout in ms |
-| `UNITY_PORT_RANGE_START` | `7890` | Start of port scan range for multi-instance discovery |
-| `UNITY_PORT_RANGE_END` | `7899` | End of port scan range |
+| `UNITY_PORT_RANGE_START` | `7700` | Start of port scan range for multi-instance discovery (kept clear of Unity's `com.unity.pipeline` 7800-7999 claim) |
+| `UNITY_PORT_RANGE_END` | `7709` | End of port scan range |
 | `UNITY_REGISTRY_STALENESS_TIMEOUT` | `300000` | Registry entry staleness timeout in ms (crash detection) |
 | `UNITY_RESPONSE_SOFT_LIMIT` | `2097152` | Response size soft limit in bytes (warning) |
 | `UNITY_RESPONSE_HARD_LIMIT` | `4194304` | Response size hard limit in bytes (truncation) |
@@ -214,7 +214,7 @@ Features for uninstalled packages return helpful messages explaining what to ins
 
 ## Troubleshooting
 
-**"Connection failed" errors** — Make sure Unity Editor is open and the plugin is installed. Check the Unity Console for `[MCP Bridge] Server started on port 7890`.
+**"Connection failed" errors** — Make sure Unity Editor is open and the plugin is installed. Check the Unity Console for `[MCP Bridge] Server started on port 7700`.
 
 **"Unity Hub not found"** — Update `UNITY_HUB_PATH` in your config to match your installation.
 

@@ -56,7 +56,12 @@ export function looksLikeErrorObject(obj) {
   if (obj.ok === false) return true; // MCPResponse factory envelope
   if (obj.success === false) return true; // legacy success flag
   if (obj.error && !claimsSuccess) return true; // legacy {error: msg}
-  if (obj.data && typeof obj.data === "object" && obj.data.error) return true; // queue-wrapped
+  // Queue-wrapped: HTTP 200 always sets the OUTER success:true, so the real signal is
+  // the inner payload — judged by this same predicate, not by a bare `.error` probe.
+  // A status tool that answers successfully while carrying an explanatory error string
+  // ({success:true, data:{success:true, error:"UMA not installed"}}) must not be flagged;
+  // the "explicit success wins" rule has to hold at every depth, not just the top.
+  if (obj.data && typeof obj.data === "object" && looksLikeErrorObject(obj.data)) return true;
   return false;
 }
 

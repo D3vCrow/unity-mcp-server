@@ -35,7 +35,7 @@ import { umaTools } from "./tools/uma-tools.js";
 import { probuilderTools } from "./tools/probuilder-tools.js";
 import { contextTools } from "./tools/context-tools.js";
 import { instanceTools } from "./tools/instance-tools.js";
-import { splitToolTiers } from "./tool-tiers.js";
+import { splitToolTiers, toolAnnotations } from "./tool-tiers.js";
 import { setAgentId, getProjectContext } from "./unity-editor-bridge.js";
 import {
   autoSelectInstance,
@@ -299,7 +299,7 @@ const server = new Server(
     },
     instructions: [
       "IMPORTANT: Always use the MCP tools provided by this server (unity_*) to interact with Unity.",
-      "NEVER call the Unity HTTP bridge directly (e.g. http://127.0.0.1:7890/api/...).",
+      "NEVER call the Unity HTTP bridge directly (e.g. http://127.0.0.1:7700/api/...).",
       "The bridge is an internal communication layer between this MCP server and the Unity Editor plugin.",
       "Direct HTTP calls bypass the multi-agent queue, agent tracking, and safety mechanisms.",
       "Use the unity_* MCP tools for all Unity operations — they handle queuing, retries, and agent identity automatically.",
@@ -354,10 +354,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         };
       }
+      const annotations = toolAnnotations(name);
+      const extra = annotations ? { annotations } : {};
       if (COMPACT_TOOLS) {
-        return { name, description: firstSentence(description), inputSchema: stripSchemaDescriptions(schema) };
+        return { name, description: firstSentence(description), inputSchema: stripSchemaDescriptions(schema), ...extra };
       }
-      return { name, description, inputSchema: schema };
+      return { name, description, inputSchema: schema, ...extra };
     }),
   };
 });
