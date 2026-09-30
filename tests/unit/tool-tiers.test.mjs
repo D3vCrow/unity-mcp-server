@@ -4,7 +4,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { splitToolTiers } from "../../src/tool-tiers.js";
+import { splitToolTiers, checkDestructiveConfirm } from "../../src/tool-tiers.js";
 import { editorTools } from "../../src/tools/editor-tools.js";
 import { umaTools } from "../../src/tools/uma-tools.js";
 import { probuilderTools } from "../../src/tools/probuilder-tools.js";
@@ -125,5 +125,31 @@ describe("splitToolTiers on synthetic input", () => {
     assert.equal(split.coreCount, 1);
     assert.equal(split.advancedCount, 1);
     assert.equal(split.coreTools[0].name, "unity_editor_state");
+  });
+});
+
+describe("checkDestructiveConfirm", () => {
+  const tokenOf = (text) => JSON.parse(text).confirm_token;
+  const rejected = (text) => JSON.parse(text).error === "confirm_token_rejected";
+
+  test("non-destructive tools pass straight through", () => {
+    assert.equal(checkDestructiveConfirm("unity_material_create", { a: 1 }), null);
+  });
+
+  test("a token only unlocks the same tool with the same params, key order ignored", () => {
+    const t1 = tokenOf(checkDestructiveConfirm("unity_asset_delete", { path: "A", force: true }));
+    assert.equal(checkDestructiveConfirm("unity_asset_delete", { force: true, path: "A" }, t1), null);
+
+    const t2 = tokenOf(checkDestructiveConfirm("unity_asset_delete", { path: "A" }));
+    assert.ok(rejected(checkDestructiveConfirm("unity_asset_delete", { path: "B" }, t2)), "different params");
+
+    const t3 = tokenOf(checkDestructiveConfirm("unity_asset_delete", { path: "A" }));
+    assert.ok(rejected(checkDestructiveConfirm("unity_component_remove", { path: "A" }, t3)), "different tool");
+  });
+
+  test("tokens expire after five minutes", () => {
+    const t0 = 1_000_000;
+    const token = tokenOf(checkDestructiveConfirm("unity_asset_delete", { path: "A" }, undefined, t0));
+    assert.ok(rejected(checkDestructiveConfirm("unity_asset_delete", { path: "A" }, token, t0 + 5 * 60 * 1000 + 1)));
   });
 });

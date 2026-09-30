@@ -5,6 +5,11 @@ All notable changes to this package will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Destructive tools are labeled and gated.** `tools/list` now marks `unity_advanced_tool`, `unity_execute_code`, `unity_execute_menu_item`, `unity_scene_save` and every `*_delete/_remove/_destroy/_clear/_reset/_uninstall` tool with `destructiveHint: true`. Nothing self-declares read-only.
+  - A label is a hint a client may ignore, so the proxy also enforces its own gate. A destructive-named tool called through `unity_advanced_tool` returns a preview plus a one-time `confirm_token` and does NOT run. Only a second call with the same tool, the same params and that token reaches Unity.
+  - The token is minted by the server, bound to a SHA-256 of tool + canonical params, single use, and expires after 5 minutes. An invented, replayed, expired or mismatched token is refused as `confirm_token_rejected`.
+  - Scope: the gate covers the proxy. The five directly exposed destructive tools carry the label only.
+  - Pattern from the Playgama developer MCP (every write annotated, irreversible actions withheld) and bex.co's "derive, reject, log" argument that annotations are never enforcement.
 - **Miss-triggered search facets** — `unity_search_by_component` and `unity_search_assets` both take a free-text enum the agent has to guess (a component type name, an asset type name). A wrong guess returned `"Component type 'X' not found"` or an empty list, and the only recovery was to guess again — one wasted round-trip per wrong guess, often several in a row. Now, **when and only when a search misses**, the response carries the real values with counts: `availableComponentTypes` (from the existing `search/scene-stats` route) or `availableAssetTypes` (from a retry with the type filter dropped), plus a `hint` telling the agent to pick from the list. New `src/search-facets.js`, 25 tests in `src/search-facets.test.js`. Node-seam only — **zero C# plugin edits, no Unity recompile needed**.
   - A hit is never enriched and never pays for a second bridge call.
   - A facet-lookup failure returns the original result untouched — enrichment can never downgrade a working search into an error.

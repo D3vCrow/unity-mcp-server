@@ -235,6 +235,27 @@ describe("queue-mode session (single instance)", () => {
     assert.ok(seen, "derived route reached the bridge");
   });
 
+  test("destructive proxy calls need a server-minted confirm_token before reaching Unity", async () => {
+    const reached = () => bridge.seen.filter((r) => r.route === "gameobject/delete").length;
+    const args = { tool: "unity_gameobject_delete", params: { path: "Enemy" } };
+
+    const preview = await client.callTool("unity_advanced_tool", args);
+    assert.equal(preview.payload.confirmation_required, true);
+    assert.equal(reached(), 0, "preview does not touch Unity");
+
+    const forged = await client.callTool("unity_advanced_tool", { ...args, confirm_token: "made-up" });
+    assert.equal(forged.payload.error, "confirm_token_rejected");
+    assert.equal(reached(), 0, "an invented token does not run the tool");
+
+    const token = preview.payload.confirm_token;
+    await client.callTool("unity_advanced_tool", { ...args, confirm_token: token });
+    assert.equal(reached(), 1, "the minted token runs it once");
+
+    const replay = await client.callTool("unity_advanced_tool", { ...args, confirm_token: token });
+    assert.equal(replay.payload.error, "confirm_token_rejected");
+    assert.equal(reached(), 1, "a used token cannot run it again");
+  });
+
   test("unity_advanced_tool proxies CORE tools via route overrides (stale-schema escape hatch)", async () => {
     // unity_material_create's real route is asset/create-material — the naive derivation
     // (material/create) used to fail with unknown-route. Same class: editor/execute-code.
