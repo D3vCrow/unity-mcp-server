@@ -35,7 +35,7 @@ import { umaTools } from "./tools/uma-tools.js";
 import { probuilderTools } from "./tools/probuilder-tools.js";
 import { contextTools } from "./tools/context-tools.js";
 import { instanceTools } from "./tools/instance-tools.js";
-import { splitToolTiers } from "./tool-tiers.js";
+import { splitToolTiers, toolAnnotations } from "./tool-tiers.js";
 import { setAgentId, getProjectContext } from "./unity-editor-bridge.js";
 import {
   autoSelectInstance,
@@ -354,10 +354,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         };
       }
+      const annotations = toolAnnotations(name);
+      const extra = annotations ? { annotations } : {};
       if (COMPACT_TOOLS) {
-        return { name, description: firstSentence(description), inputSchema: stripSchemaDescriptions(schema) };
+        return { name, description: firstSentence(description), inputSchema: stripSchemaDescriptions(schema), ...extra };
       }
-      return { name, description, inputSchema: schema };
+      return { name, description, inputSchema: schema, ...extra };
     }),
   };
 });

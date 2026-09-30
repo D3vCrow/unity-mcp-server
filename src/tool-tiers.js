@@ -195,6 +195,31 @@ function suggestSimilarTools(input, candidates) {
 }
 
 /**
+ * Exposed tools that can destroy or overwrite work. unity_advanced_tool is here because it
+ * proxies every advanced tool, deletes included — a per-tool label never reaches the client
+ * through it. execute_code / execute_menu_item run arbitrary actions.
+ */
+const DESTRUCTIVE_TOOLS = new Set([
+  "unity_advanced_tool",
+  "unity_execute_code",
+  "unity_execute_menu_item",
+  "unity_scene_save",
+]);
+const DESTRUCTIVE_NAME = /_(delete|remove|destroy|clear|reset|uninstall)(_|$)/;
+
+/**
+ * MCP tool annotations for an exposed tool, or undefined. Only ever tightens: marks a tool
+ * destructive so the client can ask before running it. Never sets readOnlyHint: true — a
+ * wrong read-only label would let a client skip a confirm the tool needed.
+ */
+export function toolAnnotations(name) {
+  if (DESTRUCTIVE_TOOLS.has(name) || DESTRUCTIVE_NAME.test(name)) {
+    return { readOnlyHint: false, destructiveHint: true };
+  }
+  return undefined;
+}
+
+/**
  * Split a flat tool array into { core, advanced }.
  * Also generates the meta-tools for accessing advanced tools.
  */

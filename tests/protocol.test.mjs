@@ -141,6 +141,16 @@ describe("queue-mode session (single instance)", () => {
     assert.ok(skip.length >= 3, "skip-set tools present");
   });
 
+  test("destructive tools carry destructiveHint; nothing claims read-only", async () => {
+    const { tools } = await client.listTools();
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+    for (const name of ["unity_advanced_tool", "unity_execute_code", "unity_execute_menu_item", "unity_packages_remove", "unity_scene_save"]) {
+      assert.equal(byName[name]?.annotations?.destructiveHint, true, `${name} is marked destructive`);
+    }
+    assert.equal(byName.unity_editor_state.annotations, undefined, "non-destructive tools stay unlabeled");
+    assert.ok(tools.every((t) => t.annotations?.readOnlyHint !== true), "no tool self-declares read-only");
+  });
+
   test("tools/list payload size is recorded (budget gate)", async () => {
     const { tools } = await client.listTools();
     const bytes = Buffer.byteLength(JSON.stringify(tools), "utf8");
