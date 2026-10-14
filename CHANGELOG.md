@@ -17,6 +17,12 @@ All notable changes to this package will be documented in this file.
   - Asset-type counts declare themselves a **sample** when the retry was truncated (`assetTypesAreSampled`, `assetTypesCountedFrom`, and a hint naming the ratio). Found by live verification: on Project-Horror a bogus type filter yields 19,494 matches with only 200 rows sampled — counts that look authoritative but aren't are worse than no counts.
   - **Verified end-to-end against two live Unity projects** (`Smart Only` on `:7891`, `Obsidian Moon` on `:7893`), 12/12 each. Unity's own queue-ticket log is the independent proof of the cost control: a miss submits two tickets (search + scene-stats), a hit submits one.
   - Pattern lifted from the speedrun talent network API, which ships live facet counts on every list response so callers "discover valid values instead of guessing". Deviation on purpose: there the facets are free (same query), here they cost a round-trip, so they fire only on the miss. See `knowledge/research/2026-07-28-vet-speedrun-talent-network-developers.md` in the Dev workspace.
+
+### Fixed
+- **Heightmap tools sent the wrong parameter names.** `unity_terrain_import_heightmap` and `unity_terrain_export_heightmap` declared `filePath` and `format`, but the plugin reads `path` and `depth` (`"8"`/`"16"`), so both always answered "path is required". The schemas now use `path` and `depth` directly.
+  - Export writes RAW only (little-endian, no header); the `png` option is gone. Import picks RAW or texture by the file extension; the unused `format: 'texture'` and `byteOrder` options are gone (the plugin reads little-endian only).
+  - The plugin reads RAW as 8-bit when `depth` is absent. The import handler sends `depth: "16"` by default, so an export then import with defaults returns the same terrain.
+- **Path confinement in the plugin (`fix/path-confinement`).** `unity_screenshot_game`, `unity_screenshot_scene`, `unity_screenshot_editor_window` and `unity_terrain_export_heightmap` take `overwrite` (default false); the plugin refuses to replace an existing file without it. Path descriptions now say paths must lie inside the Unity project folder; import no longer promises absolute `.raw` paths.
 ## [2.35.6] - 2026-07-27
 
 Companion to plugin **2.39.5** (community-reported fixes).
