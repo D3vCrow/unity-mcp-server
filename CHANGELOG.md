@@ -23,6 +23,7 @@ All notable changes to this package will be documented in this file.
   - Export writes RAW only (little-endian, no header); the `png` option is gone. Import picks RAW or texture by the file extension; the unused `format: 'texture'` and `byteOrder` options are gone (the plugin reads little-endian only).
   - The plugin reads RAW as 8-bit when `depth` is absent. The import handler sends `depth: "16"` by default, so an export then import with defaults returns the same terrain.
 - **Path confinement in the plugin (`fix/path-confinement`).** `unity_screenshot_game`, `unity_screenshot_scene`, `unity_screenshot_editor_window` and `unity_terrain_export_heightmap` take `overwrite` (default false); the plugin refuses to replace an existing file without it. Path descriptions now say paths must lie inside the Unity project folder; import no longer promises absolute `.raw` paths.
+- **`unity_shadergraph_create`'s `overwrite` names the plugin version it needs.** Only plugin 2.34.0 and later replace an existing graph when `overwrite` is true. Older plugins, including the 2.32.0 fork (`fix/path-confinement-routes`), refuse an existing graph either way. The description now says so.
 ## [2.35.6] - 2026-07-27
 
 Companion to plugin **2.39.5** (community-reported fixes).

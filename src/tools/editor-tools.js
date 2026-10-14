@@ -2214,7 +2214,7 @@ export const editorTools = [
       properties: {
         path: { type: "string", description: "Asset path for the new shader graph (e.g. 'Assets/Shaders/MyShader.shadergraph')" },
         template: { type: "string", description: "Template: urp_lit, urp_unlit, urp_sprite_lit, urp_sprite_unlit, or blank (target-less). Default urp_lit. Builds a valid graph via the real ShaderGraph API." },
-        overwrite: { type: "boolean", description: "Replace an existing graph at this path (default false: refuse)." },
+        overwrite: { type: "boolean", description: "Replace an existing graph at this path (default false: refuse). Needs plugin 2.34.0 or later; older plugins refuse an existing graph even with overwrite: true." },
       },
       required: ["path"],
     },
