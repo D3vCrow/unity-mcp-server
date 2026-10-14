@@ -2877,8 +2877,9 @@ export const editorTools = [
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Save path (default: Assets/Screenshots/GameView_timestamp.png)" },
+        path: { type: "string", description: "Save path inside the Unity project folder (default: Assets/Screenshots/GameView_timestamp.png)" },
         superSize: { type: "number", description: "Resolution multiplier (1 = normal, 2 = 2x, 4 = 4x)" },
+        overwrite: { type: "boolean", description: "Replace an existing file (default false)" },
       },
     },
     handler: async (params) => formatResult(await bridge.captureGameView(params)),
@@ -2889,9 +2890,10 @@ export const editorTools = [
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Save path (default: Assets/Screenshots/SceneView_timestamp.png)" },
+        path: { type: "string", description: "Save path inside the Unity project folder (default: Assets/Screenshots/SceneView_timestamp.png)" },
         width: { type: "number", description: "Image width (default: 1920)" },
         height: { type: "number", description: "Image height (default: 1080)" },
+        overwrite: { type: "boolean", description: "Replace an existing file (default false)" },
       },
     },
     handler: async (params) => formatResult(await bridge.captureSceneView(params)),
@@ -2907,8 +2909,9 @@ export const editorTools = [
       type: "object",
       properties: {
         window: { type: "string", description: "EditorWindow type FullName (e.g. 'UnityEditor.InspectorWindow'), simple type name, or tab title." },
-        path: { type: "string", description: "Save path ending in .png (default: Assets/Screenshots/EditorWindow_<time>.png)." },
+        path: { type: "string", description: "Save path inside the Unity project folder, ending in .png (default: Assets/Screenshots/EditorWindow_<time>.png)." },
         maxDimension: { type: "number", description: "Max pixels per side (default 8192, clamped to GPU max)." },
+        overwrite: { type: "boolean", description: "Replace an existing file (default false)." },
       },
       required: ["window"],
     },
@@ -3619,30 +3622,33 @@ export const editorTools = [
   },
   {
     name: "unity_terrain_import_heightmap",
-    description: "Import a heightmap from a RAW file or texture asset into the terrain.",
+    description: "Import a heightmap from a RAW file (little-endian, no header) or a Texture2D asset into the terrain. The file extension picks the mode: .raw reads RAW, anything else loads a texture.",
     inputSchema: {
       type: "object",
       properties: {
-        filePath: { type: "string", description: "Path to .raw file (absolute) or asset path to a Texture2D" },
-        format: { type: "string", description: "'raw16' (16-bit RAW, default), 'raw8' (8-bit RAW), or 'texture'" },
-        byteOrder: { type: "string", description: "Byte order for RAW: 'little' (default) or 'big'" },
+        path: { type: "string", description: "Path inside the Unity project folder: a .raw file, or an asset path to a readable Texture2D (e.g. 'Assets/Heightmaps/terrain.raw')" },
+        depth: { type: "string", enum: ["16", "8"], description: "RAW bit depth: '16' (default) or '8'. Ignored for textures." },
         name: { type: "string", description: "Terrain name (optional)" },
       },
-      required: ["filePath"],
+      required: ["path"],
     },
-    handler: async (params) => formatResult(await bridge.importTerrainHeightmap(params)),
+    // The plugin reads RAW as 8-bit when depth is absent; default to 16 so an
+    // export -> import round trip with defaults returns the same terrain.
+    handler: async ({ depth = "16", ...params } = {}) =>
+      formatResult(await bridge.importTerrainHeightmap({ ...params, depth })),
   },
   {
     name: "unity_terrain_export_heightmap",
-    description: "Export terrain heightmap to a RAW file or PNG texture.",
+    description: "Export the terrain heightmap to a RAW file (little-endian, no header).",
     inputSchema: {
       type: "object",
       properties: {
-        filePath: { type: "string", description: "Output file path (e.g. 'Assets/Heightmaps/terrain.raw')" },
-        format: { type: "string", description: "'raw16' (16-bit RAW, default) or 'png'" },
+        path: { type: "string", description: "Output file path inside the Unity project folder (e.g. 'Assets/Heightmaps/terrain.raw')" },
+        depth: { type: "string", enum: ["16", "8"], description: "RAW bit depth: '16' (default) or '8'" },
+        overwrite: { type: "boolean", description: "Replace an existing file (default false)" },
         name: { type: "string", description: "Terrain name (optional)" },
       },
-      required: ["filePath"],
+      required: ["path"],
     },
     handler: async (params) => formatResult(await bridge.exportTerrainHeightmap(params)),
   },
